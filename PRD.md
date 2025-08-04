@@ -134,10 +134,19 @@ The primary goal is to build a functional and accurate projection system with a 
 * **Metric 2 (Functionality):** The system successfully generates a projection for any valid team/year/week combination without runtime errors.  
 * **Metric 3 (Usability):** The user can complete the UX flow from start to finish in under 2 minutes (excluding data download/model training time) and the final output is clear and understandable.
 
-## **9\. Future Work (Post V1.0)**
+## **9\. Testing & Quality Assurance**
 
-* **V1.1:** Integrate betting market data (import\_sc\_lines) as powerful features in the team projection model.  
-* **V1.2:** Develop a dedicated model for rookie projections using college performance, draft capital (import\_draft\_picks), and combine results (import\_combine\_data).  
+A comprehensive testing suite shall be developed concurrently with the application using a framework like `pytest`.
+
+* **9.1. Unit Tests:** Each core function (e.g., feature calculation, data cleaning, share normalization) must have a corresponding unit test that verifies its correctness with known inputs and outputs.  
+* **9.2. Data Validation Tests:** Tests will be created to assert the integrity of data at various stages of the pipeline. This includes checking for expected data types, ensuring no `NaN` values exist in critical columns, and programmatically verifying that no future data leakage occurs in the training set.  
+* **9.3. Integration Tests:** The end-to-end pipeline, from data ingestion to final projection output, will be tested to ensure all components work together as expected. These tests can use cached, static data subsets to ensure speed and reproducibility.  
+* **9.4. Model Regression Tests:** A fixed, held-out dataset (e.g., the complete 2024 season) will be used as a benchmark. After any significant change to the model or feature engineering process, the model's performance (e.g., MAE) on this benchmark set will be compared to the previous version. A significant decrease in performance will indicate a regression and fail the test.
+
+## **10\. Future Work (Post V1.0)**
+
+* **V1.1:** Integrate betting market data (`import_sc_lines`) as powerful features in the team projection model.  
+* **V1.2:** Develop a dedicated model for rookie projections using college performance, draft capital (`import_draft_picks`), and combine results (`import_combine_data`).  
 * **V1.3:** Incorporate external weather forecast data for games played outdoors.  
 * **V2.0:** Expand projections to include defensive players (IDP) and kickers.  
 * **V2.1:** Build a simple web-based user interface using Streamlit or Flask to make the tool more accessible.
