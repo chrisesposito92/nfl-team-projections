@@ -49,9 +49,16 @@ class PlayerShareModel:
         
         # Identify feature columns
         id_cols = ['player_id', 'player_display_name', 'game_id', 
-                   'season', 'week', 'recent_team', 'position']
+                   'season', 'week', 'recent_team', 'position',
+                   'player_name', 'position_group', 'headshot_url', 
+                   'season_type', 'opponent_team']
+        
+        # Also exclude any object dtype columns
+        numeric_dtypes = ['int16', 'int32', 'int64', 'float16', 'float32', 'float64', 'bool']
+        numeric_cols = features.select_dtypes(include=numeric_dtypes).columns.tolist()
+        
         self.feature_columns = [
-            col for col in features.columns 
+            col for col in numeric_cols 
             if col not in targets + id_cols and not col.startswith('team_')
         ]
         
@@ -182,13 +189,20 @@ class PlayerShareModel:
         feature_path = self.model_dir / "feature_columns.pkl"
         if feature_path.exists():
             self.feature_columns = joblib.load(feature_path)
+        else:
+            raise FileNotFoundError(f"Feature columns not found at {feature_path}")
         
         # Load models
+        models_loaded = 0
         for target in PLAYER_SHARE_TARGETS:
             model_path = self.model_dir / f"{target}_model.pkl"
             if model_path.exists():
                 self.models[target] = joblib.load(model_path)
                 logger.info(f"Loaded model for {target}")
+                models_loaded += 1
+        
+        if models_loaded == 0:
+            raise FileNotFoundError(f"No models found in {self.model_dir}")
     
     def get_feature_importance(self, target: str, top_n: int = 20) -> pd.DataFrame:
         """Get feature importance for a specific target model.

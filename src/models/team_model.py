@@ -180,13 +180,20 @@ class TeamProjectionModel:
         feature_path = self.model_dir / "feature_columns.pkl"
         if feature_path.exists():
             self.feature_columns = joblib.load(feature_path)
+        else:
+            raise FileNotFoundError(f"Feature columns not found at {feature_path}")
         
         # Load models
+        models_loaded = 0
         for target in TEAM_TARGETS:
             model_path = self.model_dir / f"{target}_model.pkl"
             if model_path.exists():
                 self.models[target] = joblib.load(model_path)
                 logger.info(f"Loaded model for {target}")
+                models_loaded += 1
+        
+        if models_loaded == 0:
+            raise FileNotFoundError(f"No models found in {self.model_dir}")
     
     def get_feature_importance(self, target: str, top_n: int = 20) -> pd.DataFrame:
         """Get feature importance for a specific target model.
