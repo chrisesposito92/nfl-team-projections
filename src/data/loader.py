@@ -34,7 +34,9 @@ class NFLDataLoader:
         # Try loading all years at once first (like your working example)
         try:
             logger.info("Attempting to load all years together...")
-            return nfl.import_pbp_data(years)
+            logger.info(years)
+            pbp = nfl.import_pbp_data([2024, 2023])
+            return pbp
         except Exception as e:
             logger.warning(f"Failed to load all years together: {e}")
             
