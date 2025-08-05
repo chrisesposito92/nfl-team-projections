@@ -28,6 +28,8 @@ class ProjectionCalculator:
             DataFrame with complete player projections
         """
         logger.info("Calculating player projections")
+        logger.info(f"Team projections: {team_projections}")
+        logger.info(f"Team totals: pass_attempts={team_projections['proj_pass_attempts'].iloc[0]:.1f}, pass_yards={team_projections['proj_pass_yards'].iloc[0]:.1f}")
         
         # Get team totals
         team_totals = {
@@ -44,17 +46,30 @@ class ProjectionCalculator:
         
         # Merge efficiency metrics
         if not player_efficiency.empty:
-            projections = projections.merge(
-                player_efficiency[['player_id', 'catch_rate', 'yards_per_target', 
-                                  'yards_per_carry']],
-                on='player_id',
-                how='left'
-            )
-        else:
-            # Use default efficiency values
-            projections['catch_rate'] = 0.65  # Default 65% catch rate
-            projections['yards_per_target'] = 8.0
-            projections['yards_per_carry'] = 4.0
+            # Reset index if player_id is the index
+            if player_efficiency.index.name == 'player_id':
+                player_efficiency = player_efficiency.reset_index()
+            
+            # Check which columns exist
+            efficiency_cols = []
+            for col in ['catch_rate', 'yards_per_target', 'yards_per_carry']:
+                if col in player_efficiency.columns:
+                    efficiency_cols.append(col)
+            
+            if efficiency_cols and 'player_id' in player_efficiency.columns:
+                projections = projections.merge(
+                    player_efficiency[['player_id'] + efficiency_cols],
+                    on='player_id',
+                    how='left'
+                )
+        
+        # Fill missing efficiency values with defaults
+        if 'catch_rate' not in projections.columns or projections['catch_rate'].isna().any():
+            projections['catch_rate'] = projections.get('catch_rate', 0.65).fillna(0.65)
+        if 'yards_per_target' not in projections.columns or projections['yards_per_target'].isna().any():
+            projections['yards_per_target'] = projections.get('yards_per_target', 8.0).fillna(8.0)
+        if 'yards_per_carry' not in projections.columns or projections['yards_per_carry'].isna().any():
+            projections['yards_per_carry'] = projections.get('yards_per_carry', 4.0).fillna(4.0)
         
         # Calculate receiving stats
         projections['proj_targets'] = (

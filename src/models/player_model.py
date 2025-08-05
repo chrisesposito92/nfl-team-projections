@@ -133,8 +133,16 @@ class PlayerShareModel:
                 features[feat] = 0
         
         X = features[self.feature_columns]
-        predictions = features[['player_id', 'player_display_name', 
-                               'position', 'recent_team']].copy()
+        
+        # Handle both player_display_name and player_name columns
+        id_cols = ['player_id', 'position', 'recent_team']
+        if 'player_display_name' in features.columns:
+            id_cols.insert(1, 'player_display_name')
+        elif 'player_name' in features.columns:
+            features['player_display_name'] = features['player_name']
+            id_cols.insert(1, 'player_display_name')
+        
+        predictions = features[id_cols].copy()
         
         for target, model in self.models.items():
             predictions[f'proj_{target}'] = model.predict(X)

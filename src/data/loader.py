@@ -234,21 +234,39 @@ class NFLDataLoader:
         if rosters is None:
             raise ValueError(f"Could not load roster data for {year} or any recent year")
         
+        logger.info(f"Roster columns: {rosters.columns.tolist()}")
+        logger.info(f"Unique teams in roster: {rosters['team'].unique() if 'team' in rosters.columns else 'team column not found'}")
+        
         # Filter to specific team
-        if roster_year < year:
-            # For future years, get the latest roster for the team
+        if roster_year < year or pd.isna(rosters['week']).all():
+            # For future years or preseason rosters (no week data), get all players for the team
+            logger.info(f"Looking for {team} roster in {roster_year} data (future/preseason projection)")
             team_roster = rosters[rosters['team'] == team]
-            if not team_roster.empty:
-                # Get the most recent week's roster
+            logger.info(f"Found {len(team_roster)} roster entries for {team}")
+            
+            # If there are week values, use the most recent
+            if not team_roster.empty and not pd.isna(team_roster['week']).all():
                 latest_week = team_roster['week'].max()
+                logger.info(f"Using latest week {latest_week} roster")
                 team_roster = team_roster[team_roster['week'] == latest_week]
         else:
-            # For current/past years, get specific week
+            # For current/past years with week data, get specific week
+            logger.info(f"Looking for {team} roster in week {week} of {roster_year}")
             team_roster = rosters[
                 (rosters['season'] == roster_year) & 
                 (rosters['week'] == week) & 
                 (rosters['team'] == team)
             ]
+            
+            # If no week-specific roster found, try getting any roster for the team
+            if team_roster.empty:
+                logger.info(f"No week {week} roster found, using any available roster for {team}")
+                team_roster = rosters[
+                    (rosters['season'] == roster_year) & 
+                    (rosters['team'] == team)
+                ]
+        
+        logger.info(f"Final team roster size: {len(team_roster)} players")
         
         # Try to get injury data if available
         try:

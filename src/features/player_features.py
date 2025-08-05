@@ -231,6 +231,13 @@ class PlayerFeatureEngineer:
         Returns:
             DataFrame with features for all active players
         """
+        logger.info(f"Preparing prediction features for {len(active_players)} active players")
+        
+        if active_players.empty:
+            logger.warning(f"No active players found for {team} in week {week} of {season}")
+            # Return empty DataFrame with expected columns
+            return pd.DataFrame()
+        
         prediction_features = []
         
         for _, player in active_players.iterrows():
@@ -248,7 +255,7 @@ class PlayerFeatureEngineer:
                 # New player (likely rookie) - create baseline features
                 player_features = pd.DataFrame([{
                     'player_id': player_id,
-                    'player_display_name': player.get('player_display_name', 'Unknown'),
+                    'player_display_name': player.get('player_display_name', player.get('player_name', 'Unknown')),
                     'position': player.get('position', 'Unknown'),
                     'recent_team': team,
                     'seasons_played': 0,
@@ -279,4 +286,8 @@ class PlayerFeatureEngineer:
             
             prediction_features.append(player_features)
         
+        if not prediction_features:
+            logger.warning("No prediction features could be created for any player")
+            return pd.DataFrame()
+            
         return pd.concat(prediction_features, ignore_index=True)
