@@ -31,16 +31,16 @@ env/
 *.swp
 *.swo
 
-# Data
-data/
+# Data files (but not source code in src/data/)
+/data/
 *.csv
 *.parquet
 *.pkl
 *.joblib
 
-# Models
-models/
-saved_models/
+# Trained model files (but not source code in src/models/)
+/models/
+/saved_models/
 
 # Testing
 .pytest_cache/

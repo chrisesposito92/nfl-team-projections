@@ -214,8 +214,19 @@ class NFLProjectionsCLI:
         opponent = game['away_team'] if home else game['home_team']
         
         # Load recent data for features
+        # For now, use 2023 data since there seem to be issues with 2024
         recent_years = [year - 1, year - 2]
-        recent_data = self.loader.load_all_data(recent_years)
+        
+        # Download data if not cached
+        click.echo(f"Loading data for years: {recent_years}")
+        click.echo("This may take a few minutes if data needs to be downloaded...")
+        
+        try:
+            recent_data = self.loader.load_all_data(recent_years)
+        except Exception as e:
+            click.secho(f"Error loading data: {e}", fg='red')
+            click.echo("Trying with just 2023 data...")
+            recent_data = self.loader.load_all_data([2023])
         
         # Prepare team features
         team_stats = self.aggregator.aggregate_team_game_stats(recent_data['pbp'])
