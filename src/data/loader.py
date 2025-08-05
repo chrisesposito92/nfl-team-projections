@@ -216,34 +216,71 @@ class NFLDataLoader:
         Returns:
             DataFrame with active players
         """
-        rosters = self.load_rosters([year])
-        injuries = self.load_injuries([year])
+        # Try to load roster data, starting with the requested year and working backwards
+        rosters = None
+        roster_year = year
         
-        # Filter to specific week and team
-        team_roster = rosters[
-            (rosters['season'] == year) & 
-            (rosters['week'] == week) & 
-            (rosters['team'] == team)
-        ]
+        # Try up to 5 years back to find roster data
+        for attempt_year in range(year, year - 5, -1):
+            try:
+                rosters = self.load_rosters([attempt_year])
+                roster_year = attempt_year
+                logger.info(f"Using {roster_year} roster data for {year} projections")
+                break
+            except Exception as e:
+                logger.debug(f"Could not load {attempt_year} rosters: {e}")
+                continue
         
-        # Get injury status for the week
-        team_injuries = injuries[
-            (injuries['season'] == year) & 
-            (injuries['week'] == week) & 
-            (injuries['team'] == team)
-        ]
+        if rosters is None:
+            raise ValueError(f"Could not load roster data for {year} or any recent year")
         
-        # Merge injury status
-        if not team_injuries.empty:
-            team_roster = team_roster.merge(
-                team_injuries[['player_id', 'report_status']],
-                on='player_id',
-                how='left'
-            )
-            
-            # Filter out inactive players
-            team_roster = team_roster[
-                ~team_roster['report_status'].isin(['Out', 'Injured Reserve'])
+        # Filter to specific team
+        if roster_year < year:
+            # For future years, get the latest roster for the team
+            team_roster = rosters[rosters['team'] == team]
+            if not team_roster.empty:
+                # Get the most recent week's roster
+                latest_week = team_roster['week'].max()
+                team_roster = team_roster[team_roster['week'] == latest_week]
+        else:
+            # For current/past years, get specific week
+            team_roster = rosters[
+                (rosters['season'] == roster_year) & 
+                (rosters['week'] == week) & 
+                (rosters['team'] == team)
             ]
+        
+        # Try to get injury data if available
+        try:
+            injuries = self.load_injuries([roster_year])
+            
+            # Get injury status
+            team_injuries = injuries[
+                (injuries['season'] == roster_year) & 
+                (injuries['team'] == team)
+            ]
+            
+            if roster_year < year and not team_injuries.empty:
+                # Use most recent injury data for future projections
+                latest_injury_week = team_injuries['week'].max()
+                team_injuries = team_injuries[team_injuries['week'] == latest_injury_week]
+            elif not team_injuries.empty:
+                # Use specific week for current year
+                team_injuries = team_injuries[team_injuries['week'] == week]
+            
+            # Merge injury status
+            if not team_injuries.empty:
+                team_roster = team_roster.merge(
+                    team_injuries[['player_id', 'report_status']],
+                    on='player_id',
+                    how='left'
+                )
+                
+                # Filter out inactive players
+                team_roster = team_roster[
+                    ~team_roster['report_status'].isin(['Out', 'Injured Reserve'])
+                ]
+        except Exception as e:
+            logger.warning(f"Could not load injury data: {e}. Assuming all players are healthy.")
         
         return team_roster
