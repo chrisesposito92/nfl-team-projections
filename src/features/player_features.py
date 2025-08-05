@@ -19,11 +19,14 @@ class PlayerFeatureEngineer:
         """
         self.rolling_windows = rolling_windows
     
-    def create_features(self, player_stats: pd.DataFrame) -> pd.DataFrame:
+    def create_features(self, player_stats: pd.DataFrame, seasonal_data: pd.DataFrame = None,
+                       depth_charts: pd.DataFrame = None) -> pd.DataFrame:
         """Create all features for player share projections.
         
         Args:
             player_stats: DataFrame with player-game statistics
+            seasonal_data: Optional historical seasonal data with target shares
+            depth_charts: Optional depth chart data
             
         Returns:
             DataFrame with engineered features
@@ -46,6 +49,14 @@ class PlayerFeatureEngineer:
         
         # Create position group features
         features = self._create_position_group_features(features)
+        
+        # Add historical seasonal shares if available
+        if seasonal_data is not None:
+            features = self._add_historical_shares(features, seasonal_data)
+        
+        # Add depth chart features if available
+        if depth_charts is not None:
+            features = self._add_depth_features(features, depth_charts)
         
         logger.info(f"Created {len(features.columns)} player features")
         
@@ -217,7 +228,8 @@ class PlayerFeatureEngineer:
         active_players: pd.DataFrame,
         team: str,
         week: int,
-        season: int
+        season: int,
+        seasonal_data: pd.DataFrame = None
     ) -> pd.DataFrame:
         """Prepare features for active players for prediction.
         
@@ -278,6 +290,18 @@ class PlayerFeatureEngineer:
                 for col in historical_data.columns:
                     if ('avg' in col or 'trend' in col) and col not in player_features.columns:
                         player_features[col] = 0
+                
+                # Add historical shares from seasonal data if available
+                if seasonal_data is not None and player_id in seasonal_data['player_id'].values:
+                    player_seasonal = seasonal_data[seasonal_data['player_id'] == player_id]
+                    if not player_seasonal.empty:
+                        # Get most recent season
+                        latest_season = player_seasonal.iloc[-1]
+                        for col in ['tgt_sh', 'ay_sh', 'ry_sh', 'wopr_y', 'dom']:
+                            if col in latest_season:
+                                # Rename wopr_y to just wopr in the features
+                                feature_name = col if col != 'wopr_y' else 'wopr'
+                                player_features[f'last_season_{feature_name}'] = latest_season[col]
             
             # Update current game info
             player_features['season'] = season
@@ -291,3 +315,96 @@ class PlayerFeatureEngineer:
             return pd.DataFrame()
             
         return pd.concat(prediction_features, ignore_index=True)
+    
+    def _add_historical_shares(self, features: pd.DataFrame, seasonal_data: pd.DataFrame) -> pd.DataFrame:
+        """Add historical target share data from seasonal stats.
+        
+        Args:
+            features: Current feature DataFrame
+            seasonal_data: Historical seasonal data with shares
+            
+        Returns:
+            Features with historical shares added
+        """
+        logger.info("Adding historical share features")
+        
+        # Key seasonal share columns from the data
+        # Note: wopr_y is the custom calculated WOPR, wopr_x is from nfl_data_py
+        share_cols = ['tgt_sh', 'ay_sh', 'ry_sh', 'rtd_sh', 'wopr_y', 'dom']
+        
+        # Get most recent season for each player
+        most_recent = seasonal_data.sort_values(['player_id', 'season']).groupby('player_id').last()
+        
+        # Add last season shares
+        for col in share_cols:
+            if col in most_recent.columns:
+                # Rename wopr_y to just wopr in the features
+                feature_name = col if col != 'wopr_y' else 'wopr'
+                features[f'last_season_{feature_name}'] = features['player_id'].map(
+                    most_recent[col].to_dict()
+                ).fillna(0)
+        
+        # Add career averages
+        # Filter to only existing columns
+        existing_share_cols = [col for col in share_cols if col in seasonal_data.columns]
+        career_avg = seasonal_data.groupby('player_id')[existing_share_cols].mean()
+        
+        for col in existing_share_cols:
+            if col in career_avg.columns:
+                feature_name = col if col != 'wopr_y' else 'wopr'
+                features[f'career_avg_{feature_name}'] = features['player_id'].map(
+                    career_avg[col].to_dict()
+                ).fillna(0)
+        
+        # Add last 3 year average (more recent trend)
+        current_year = features['season'].max()
+        recent_years = seasonal_data[seasonal_data['season'] >= current_year - 3]
+        recent_avg = recent_years.groupby('player_id')[existing_share_cols].mean()
+        
+        for col in existing_share_cols:
+            if col in recent_avg.columns:
+                feature_name = col if col != 'wopr_y' else 'wopr'
+                features[f'recent_avg_{feature_name}'] = features['player_id'].map(
+                    recent_avg[col].to_dict()
+                ).fillna(0)
+        
+        return features
+    
+    def _add_depth_features(self, features: pd.DataFrame, depth_charts: pd.DataFrame) -> pd.DataFrame:
+        """Add depth chart-based features.
+        
+        Args:
+            features: Current feature DataFrame
+            depth_charts: Depth chart data
+            
+        Returns:
+            Features with depth chart features added
+        """
+        logger.info("Adding depth chart features")
+        
+        # Get most recent depth chart for each player
+        if 'week' in depth_charts.columns and 'gsis_id' in depth_charts.columns:
+            # Group by gsis_id (player_id) and get most recent
+            depth_features = depth_charts.sort_values(['gsis_id', 'season', 'week']).groupby('gsis_id').last()
+        else:
+            # Use player_id if available
+            depth_features = depth_charts.groupby('player_id').last()
+        
+        # Add depth rank (1 = starter, 2 = backup, etc.)
+        if 'depth_team' in depth_features.columns:
+            features['depth_rank'] = features['player_id'].map(
+                depth_features['depth_team'].to_dict()
+            ).fillna(4)  # Assume 4th string if not on depth chart
+        
+        # Binary starter flag
+        features['is_starter'] = (features.get('depth_rank', 4) == 1).astype(int)
+        
+        # Add position-specific depth rank (e.g., WR1, WR2, WR3)
+        features['position_depth_rank'] = features.groupby(
+            ['recent_team', 'position']
+        )['target_share'].rank(method='dense', ascending=False)
+        
+        # Is top 3 at position
+        features['is_top3_position'] = (features['position_depth_rank'] <= 3).astype(int)
+        
+        return features

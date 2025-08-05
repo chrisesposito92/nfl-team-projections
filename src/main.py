@@ -193,7 +193,18 @@ class NFLProjectionsCLI:
         # Engineer features
         click.echo("Engineering features...")
         team_features = self.team_feature_engineer.create_features(datasets['team_train'])
-        player_features = self.player_feature_engineer.create_features(datasets['player_train'])
+        
+        # Load depth charts if available
+        try:
+            depth_charts = self.loader.load_depth_charts(training_years)
+        except:
+            depth_charts = None
+            
+        player_features = self.player_feature_engineer.create_features(
+            datasets['player_train'],
+            seasonal_data=data.get('seasonal'),
+            depth_charts=depth_charts
+        )
         
         # Train models
         click.echo("Training team model...")
@@ -245,10 +256,21 @@ class NFLProjectionsCLI:
         # Prepare player features
         player_stats = self.aggregator.aggregate_player_game_stats(recent_data['weekly'])
         player_stats = self.aggregator.merge_snap_data(player_stats, recent_data['snaps'])
-        player_features = self.player_feature_engineer.create_features(player_stats)
+        
+        # Load seasonal data for historical shares
+        try:
+            seasonal_data = self.loader.load_seasonal_data(recent_years + [year])
+        except:
+            seasonal_data = None
+            
+        player_features = self.player_feature_engineer.create_features(
+            player_stats,
+            seasonal_data=seasonal_data
+        )
         
         player_prediction_features = self.player_feature_engineer.prepare_prediction_features(
-            player_features, active_players, team, week, year
+            player_features, active_players, team, week, year,
+            seasonal_data=seasonal_data
         )
         
         # Generate player share projections

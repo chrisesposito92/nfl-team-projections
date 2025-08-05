@@ -34,6 +34,13 @@ This is an NFL Offensive Projections Modeler that uses machine learning to forec
 - Run the CLI: `python src/main.py`
 - Train new models: Delete the `models/` directory and run the CLI
 
+## Recent Improvements (V1.1)
+- **Depth Chart Integration**: Now uses `import_depth_charts()` to identify starters and backups
+- **Historical Share Features**: Incorporates `import_seasonal_data()` for tgt_sh, ay_sh, ry_sh, wopr, dom
+- **Position-Based Constraints**: Enforces realistic target distributions (WR1: 20-35%, WR2: 15-25%, etc.)
+- **Better Player Filtering**: Only projects offensive skill position players
+- **Proper QB Stats**: Only starting QB receives passing statistics
+
 ## Known Limitations (V1.0)
 - Rookies get minimal projections due to lack of historical data
 - No playoff projections

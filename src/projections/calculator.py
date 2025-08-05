@@ -44,6 +44,9 @@ class ProjectionCalculator:
         
         projections = player_shares.copy()
         
+        # Apply position-based constraints first
+        projections = self._apply_position_constraints(projections)
+        
         # Normalize shares to ensure they sum to 1.0 for non-QB positions
         non_qb_mask = projections['position'] != 'QB'
         
@@ -178,6 +181,87 @@ class ProjectionCalculator:
         ]
         
         return projections[final_columns]
+    
+    def _apply_position_constraints(self, projections: pd.DataFrame) -> pd.DataFrame:
+        """Apply realistic position-based constraints to shares.
+        
+        Args:
+            projections: Raw share projections
+            
+        Returns:
+            Constrained projections
+        """
+        # Sort by depth chart position if available
+        if 'depth_team' in projections.columns:
+            projections = projections.sort_values(['position', 'depth_team'])
+        else:
+            # Sort by predicted share to identify primary players
+            projections = projections.sort_values(['position', 'proj_target_share'], ascending=[True, False])
+        
+        # Apply position-specific constraints
+        for position in ['WR', 'RB', 'TE']:
+            pos_mask = projections['position'] == position
+            pos_players = projections[pos_mask]
+            
+            if len(pos_players) == 0:
+                continue
+                
+            # Ensure realistic share distribution within position
+            if position == 'WR':
+                # WR1 typically gets 20-35% of targets
+                # WR2 gets 15-25%
+                # WR3 gets 10-20%
+                for i, idx in enumerate(pos_players.index):
+                    if i == 0:  # WR1
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.20, min(0.35, current_share * 1.5))
+                    elif i == 1:  # WR2
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.15, min(0.25, current_share * 1.2))
+                    elif i == 2:  # WR3
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.10, min(0.20, current_share))
+                    else:  # WR4+
+                        projections.loc[idx, 'proj_target_share'] *= 0.5
+                        
+            elif position == 'RB':
+                # RB1 typically gets 10-20% of targets
+                # RB2 gets 5-15%
+                for i, idx in enumerate(pos_players.index):
+                    if i == 0:  # RB1
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.10, min(0.20, current_share * 1.3))
+                    elif i == 1:  # RB2
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.05, min(0.15, current_share))
+                    else:  # RB3+
+                        projections.loc[idx, 'proj_target_share'] *= 0.3
+                        
+            elif position == 'TE':
+                # TE1 typically gets 15-25% of targets
+                # TE2 gets 5-10%
+                for i, idx in enumerate(pos_players.index):
+                    if i == 0:  # TE1
+                        current_share = projections.loc[idx, 'proj_target_share']
+                        projections.loc[idx, 'proj_target_share'] = max(0.15, min(0.25, current_share * 1.4))
+                    else:  # TE2+
+                        projections.loc[idx, 'proj_target_share'] *= 0.4
+        
+        # Apply rushing share constraints
+        rb_mask = projections['position'] == 'RB'
+        rb_players = projections[rb_mask].sort_values('proj_rush_attempt_share', ascending=False)
+        
+        for i, idx in enumerate(rb_players.index):
+            if i == 0:  # RB1 gets 40-60% of RB rushes
+                current_share = projections.loc[idx, 'proj_rush_attempt_share']
+                projections.loc[idx, 'proj_rush_attempt_share'] = max(0.40, min(0.60, current_share * 1.5))
+            elif i == 1:  # RB2 gets 20-40%
+                current_share = projections.loc[idx, 'proj_rush_attempt_share']
+                projections.loc[idx, 'proj_rush_attempt_share'] = max(0.20, min(0.40, current_share * 1.2))
+            else:  # RB3+
+                projections.loc[idx, 'proj_rush_attempt_share'] *= 0.5
+        
+        return projections
     
     def _clean_projections(self, projections: pd.DataFrame) -> pd.DataFrame:
         """Clean and validate projections.

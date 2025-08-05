@@ -150,6 +150,18 @@ class NFLDataLoader:
         logger.info(f"Loading depth charts for years: {years}")
         return nfl.import_depth_charts(years)
     
+    def load_seasonal_data(self, years: List[int]) -> pd.DataFrame:
+        """Load seasonal player data for specified years.
+        
+        Args:
+            years: List of years to load
+            
+        Returns:
+            DataFrame with seasonal player data including target shares
+        """
+        logger.info(f"Loading seasonal data for years: {years}")
+        return nfl.import_seasonal_data(years)
+    
     def load_team_descriptions(self) -> pd.DataFrame:
         """Load team descriptions and abbreviations.
         
@@ -172,7 +184,7 @@ class NFLDataLoader:
         
         data = {}
         
-        with tqdm(total=7, desc="Loading NFL data") as pbar:
+        with tqdm(total=8, desc="Loading NFL data") as pbar:
             data['pbp'] = self.load_pbp_data(years)
             pbar.update(1)
             
@@ -189,6 +201,9 @@ class NFLDataLoader:
             pbar.update(1)
             
             data['injuries'] = self.load_injuries(years)
+            pbar.update(1)
+            
+            data['seasonal'] = self.load_seasonal_data(years)
             pbar.update(1)
             
             data['teams'] = self.load_team_descriptions()
@@ -248,27 +263,41 @@ class NFLDataLoader:
             # Filter to team and relevant positions
             offensive_positions = ['QB', 'RB', 'WR', 'TE', 'FB']
             
-            # Filter to team
-            team_depth = depth_charts[depth_charts['team'] == team]
+            # Filter to team (handle both 'team' and 'club_code' columns)
+            if 'team' in depth_charts.columns:
+                team_depth = depth_charts[depth_charts['team'] == team]
+            elif 'club_code' in depth_charts.columns:
+                team_depth = depth_charts[depth_charts['club_code'] == team]
+            else:
+                logger.warning("No team column found in depth charts")
+                team_depth = pd.DataFrame()
             
             # Filter to offensive positions
-            offensive_pos_abbrevs = ['QB', 'RB', 'WR', 'TE', 'FB', 'HB', 'FL']
+            offensive_positions = ['QB', 'RB', 'WR', 'TE', 'FB', 'HB']
             if not team_depth.empty:
-                team_depth = team_depth[
-                    team_depth['pos_abb'].isin(offensive_pos_abbrevs) &
-                    (team_depth['pos_rank'] <= 3)  # Top 3 on depth chart
-                ]
+                # Handle different column names between years
+                if 'pos_abb' in team_depth.columns:
+                    # 2025 format
+                    team_depth = team_depth[
+                        team_depth['pos_abb'].isin(offensive_positions) &
+                        (team_depth['pos_rank'] <= 3)  # Top 3 on depth chart
+                    ]
+                    team_depth['position'] = team_depth['pos_abb']
+                    team_depth['depth_team'] = team_depth['pos_rank']
+                elif 'position' in team_depth.columns:
+                    # 2024 format
+                    team_depth = team_depth[
+                        team_depth['position'].isin(offensive_positions) &
+                        (team_depth['depth_team'] <= 3)  # Top 3 on depth chart
+                    ]
                 
-                # Rename/map columns to match expected format
-                team_depth['position'] = team_depth['pos_abb']
-                team_depth['depth_team'] = team_depth['pos_rank']
+                # Add player_name if not present
+                if 'player_name' not in team_depth.columns and 'full_name' in team_depth.columns:
+                    team_depth['player_name'] = team_depth['full_name']
                 
                 # Use gsis_id as player_id
                 if 'gsis_id' in team_depth.columns:
                     team_depth['player_id'] = team_depth['gsis_id']
-                else:
-                    # Create a pseudo player_id from name
-                    team_depth['player_id'] = team_depth['player_name'].str.replace(' ', '_').str.lower()
                 
                 logger.info(f"Found {len(team_depth)} offensive players from depth chart")
                 return team_depth
