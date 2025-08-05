@@ -138,6 +138,18 @@ class NFLDataLoader:
         logger.info(f"Loading injury data for years: {years}")
         return nfl.import_injuries(years)
     
+    def load_depth_charts(self, years: List[int]) -> pd.DataFrame:
+        """Load depth chart data for specified years.
+        
+        Args:
+            years: List of years to load
+            
+        Returns:
+            DataFrame with depth chart data
+        """
+        logger.info(f"Loading depth charts for years: {years}")
+        return nfl.import_depth_charts(years)
+    
     def load_team_descriptions(self) -> pd.DataFrame:
         """Load team descriptions and abbreviations.
         
@@ -206,7 +218,7 @@ class NFLDataLoader:
         return schedule
     
     def get_active_players(self, year: int, week: int, team: str) -> pd.DataFrame:
-        """Get active players for a specific team and week.
+        """Get active players for a specific team and week using depth charts.
         
         Args:
             year: Year
@@ -216,11 +228,58 @@ class NFLDataLoader:
         Returns:
             DataFrame with active players
         """
-        # Try to load roster data, starting with the requested year and working backwards
+        # Try to load depth chart data first
+        depth_year = year
+        depth_charts = None
+        
+        # Try current year first, then work backwards
+        for attempt_year in range(year, year - 3, -1):
+            try:
+                depth_charts = self.load_depth_charts([attempt_year])
+                if not depth_charts.empty:
+                    depth_year = attempt_year
+                    logger.info(f"Using {depth_year} depth charts for {year} projections")
+                    break
+            except Exception as e:
+                logger.debug(f"Could not load {attempt_year} depth charts: {e}")
+                continue
+        
+        if depth_charts is not None and not depth_charts.empty:
+            # Filter to team and relevant positions
+            offensive_positions = ['QB', 'RB', 'WR', 'TE', 'FB']
+            
+            # Filter to team
+            team_depth = depth_charts[depth_charts['team'] == team]
+            
+            # Filter to offensive positions
+            offensive_pos_abbrevs = ['QB', 'RB', 'WR', 'TE', 'FB', 'HB', 'FL']
+            if not team_depth.empty:
+                team_depth = team_depth[
+                    team_depth['pos_abb'].isin(offensive_pos_abbrevs) &
+                    (team_depth['pos_rank'] <= 3)  # Top 3 on depth chart
+                ]
+                
+                # Rename/map columns to match expected format
+                team_depth['position'] = team_depth['pos_abb']
+                team_depth['depth_team'] = team_depth['pos_rank']
+                
+                # Use gsis_id as player_id
+                if 'gsis_id' in team_depth.columns:
+                    team_depth['player_id'] = team_depth['gsis_id']
+                else:
+                    # Create a pseudo player_id from name
+                    team_depth['player_id'] = team_depth['player_name'].str.replace(' ', '_').str.lower()
+                
+                logger.info(f"Found {len(team_depth)} offensive players from depth chart")
+                return team_depth
+        
+        # Fallback to roster method if depth charts unavailable
+        logger.info("Depth charts not available, falling back to roster data")
+        
+        # Original roster-based logic as fallback
         rosters = None
         roster_year = year
         
-        # Try up to 5 years back to find roster data
         for attempt_year in range(year, year - 5, -1):
             try:
                 rosters = self.load_rosters([attempt_year])
@@ -232,73 +291,15 @@ class NFLDataLoader:
                 continue
         
         if rosters is None:
-            raise ValueError(f"Could not load roster data for {year} or any recent year")
+            raise ValueError(f"Could not load roster or depth chart data for {year}")
         
-        logger.info(f"Roster columns: {rosters.columns.tolist()}")
-        logger.info(f"Unique teams in roster: {rosters['team'].unique() if 'team' in rosters.columns else 'team column not found'}")
+        # Filter to specific team and offensive positions
+        offensive_positions = ['QB', 'RB', 'WR', 'TE', 'FB']
+        team_roster = rosters[
+            (rosters['team'] == team) & 
+            (rosters['position'].isin(offensive_positions))
+        ]
         
-        # Filter to specific team
-        if roster_year < year or pd.isna(rosters['week']).all():
-            # For future years or preseason rosters (no week data), get all players for the team
-            logger.info(f"Looking for {team} roster in {roster_year} data (future/preseason projection)")
-            team_roster = rosters[rosters['team'] == team]
-            logger.info(f"Found {len(team_roster)} roster entries for {team}")
-            
-            # If there are week values, use the most recent
-            if not team_roster.empty and not pd.isna(team_roster['week']).all():
-                latest_week = team_roster['week'].max()
-                logger.info(f"Using latest week {latest_week} roster")
-                team_roster = team_roster[team_roster['week'] == latest_week]
-        else:
-            # For current/past years with week data, get specific week
-            logger.info(f"Looking for {team} roster in week {week} of {roster_year}")
-            team_roster = rosters[
-                (rosters['season'] == roster_year) & 
-                (rosters['week'] == week) & 
-                (rosters['team'] == team)
-            ]
-            
-            # If no week-specific roster found, try getting any roster for the team
-            if team_roster.empty:
-                logger.info(f"No week {week} roster found, using any available roster for {team}")
-                team_roster = rosters[
-                    (rosters['season'] == roster_year) & 
-                    (rosters['team'] == team)
-                ]
-        
-        logger.info(f"Final team roster size: {len(team_roster)} players")
-        
-        # Try to get injury data if available
-        try:
-            injuries = self.load_injuries([roster_year])
-            
-            # Get injury status
-            team_injuries = injuries[
-                (injuries['season'] == roster_year) & 
-                (injuries['team'] == team)
-            ]
-            
-            if roster_year < year and not team_injuries.empty:
-                # Use most recent injury data for future projections
-                latest_injury_week = team_injuries['week'].max()
-                team_injuries = team_injuries[team_injuries['week'] == latest_injury_week]
-            elif not team_injuries.empty:
-                # Use specific week for current year
-                team_injuries = team_injuries[team_injuries['week'] == week]
-            
-            # Merge injury status
-            if not team_injuries.empty:
-                team_roster = team_roster.merge(
-                    team_injuries[['player_id', 'report_status']],
-                    on='player_id',
-                    how='left'
-                )
-                
-                # Filter out inactive players
-                team_roster = team_roster[
-                    ~team_roster['report_status'].isin(['Out', 'Injured Reserve'])
-                ]
-        except Exception as e:
-            logger.warning(f"Could not load injury data: {e}. Assuming all players are healthy.")
+        logger.info(f"Found {len(team_roster)} offensive players from roster")
         
         return team_roster

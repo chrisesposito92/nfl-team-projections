@@ -28,7 +28,7 @@ class ProjectionCalculator:
             DataFrame with complete player projections
         """
         logger.info("Calculating player projections")
-        logger.info(f"Team projections: {team_projections}")
+        logger.info(f"Team projections columns: {team_projections.columns.tolist()}")
         logger.info(f"Team totals: pass_attempts={team_projections['proj_pass_attempts'].iloc[0]:.1f}, pass_yards={team_projections['proj_pass_yards'].iloc[0]:.1f}")
         
         # Get team totals
@@ -43,6 +43,24 @@ class ProjectionCalculator:
         }
         
         projections = player_shares.copy()
+        
+        # Normalize shares to ensure they sum to 1.0 for non-QB positions
+        non_qb_mask = projections['position'] != 'QB'
+        
+        for col in ['proj_target_share', 'proj_pass_td_share']:
+            if col in projections.columns:
+                non_qb_total = projections.loc[non_qb_mask, col].sum()
+                if non_qb_total > 0:
+                    projections.loc[non_qb_mask, col] = projections.loc[non_qb_mask, col] / non_qb_total
+                # Set QB shares to 0 for receiving stats
+                projections.loc[~non_qb_mask, col] = 0
+        
+        # Normalize rush shares across all positions  
+        for col in ['proj_rush_attempt_share', 'proj_rush_td_share']:
+            if col in projections.columns:
+                total = projections[col].sum()
+                if total > 0:
+                    projections[col] = projections[col] / total
         
         # Merge efficiency metrics
         if not player_efficiency.empty:
@@ -63,15 +81,19 @@ class ProjectionCalculator:
                     how='left'
                 )
         
-        # Fill missing efficiency values with defaults
-        if 'catch_rate' not in projections.columns or projections['catch_rate'].isna().any():
-            projections['catch_rate'] = projections.get('catch_rate', 0.65).fillna(0.65)
-        if 'yards_per_target' not in projections.columns or projections['yards_per_target'].isna().any():
-            projections['yards_per_target'] = projections.get('yards_per_target', 8.0).fillna(8.0)
-        if 'yards_per_carry' not in projections.columns or projections['yards_per_carry'].isna().any():
-            projections['yards_per_carry'] = projections.get('yards_per_carry', 4.0).fillna(4.0)
+        # Fill missing efficiency values with position-specific defaults
+        projections.loc[projections['position'] == 'RB', 'catch_rate'] = projections.loc[projections['position'] == 'RB', 'catch_rate'].fillna(0.75)
+        projections.loc[projections['position'] == 'WR', 'catch_rate'] = projections.loc[projections['position'] == 'WR', 'catch_rate'].fillna(0.65)
+        projections.loc[projections['position'] == 'TE', 'catch_rate'] = projections.loc[projections['position'] == 'TE', 'catch_rate'].fillna(0.70)
+        projections.loc[projections['position'] == 'QB', 'catch_rate'] = 0  # QBs don't catch passes
         
-        # Calculate receiving stats
+        projections.loc[projections['position'] == 'RB', 'yards_per_target'] = projections.loc[projections['position'] == 'RB', 'yards_per_target'].fillna(7.0)
+        projections.loc[projections['position'] == 'WR', 'yards_per_target'] = projections.loc[projections['position'] == 'WR', 'yards_per_target'].fillna(10.0)
+        projections.loc[projections['position'] == 'TE', 'yards_per_target'] = projections.loc[projections['position'] == 'TE', 'yards_per_target'].fillna(8.0)
+        
+        projections['yards_per_carry'] = projections['yards_per_carry'].fillna(4.0)
+        
+        # Calculate receiving stats (not for QBs)
         projections['proj_targets'] = (
             team_totals['pass_attempts'] * projections['proj_target_share']
         ).round()
@@ -80,9 +102,15 @@ class ProjectionCalculator:
             projections['proj_targets'] * projections['catch_rate']
         ).round()
         
-        projections['proj_receiving_yards'] = (
-            projections['proj_targets'] * projections['yards_per_target']
-        ).round()
+        # Calculate receiving yards proportionally to ensure they sum to team passing yards
+        expected_yards = projections.loc[non_qb_mask, 'proj_targets'] * projections.loc[non_qb_mask, 'yards_per_target']
+        total_expected = expected_yards.sum()
+        
+        projections['proj_receiving_yards'] = 0
+        if total_expected > 0:
+            projections.loc[non_qb_mask, 'proj_receiving_yards'] = (
+                expected_yards * team_totals['pass_yards'] / total_expected
+            ).round()
         
         # Calculate rushing stats
         projections['proj_rush_attempts'] = (
@@ -93,21 +121,14 @@ class ProjectionCalculator:
             projections['proj_rush_attempts'] * projections['yards_per_carry']
         ).round()
         
-        # Calculate touchdowns by position
+        # Calculate touchdowns
         projections['proj_passing_tds'] = 0
         projections['proj_receiving_tds'] = 0
         projections['proj_rushing_tds'] = 0
         
-        # QB passing TDs
-        qb_mask = projections['position'] == 'QB'
-        projections.loc[qb_mask, 'proj_passing_tds'] = (
-            team_totals['pass_tds'] * projections.loc[qb_mask, 'proj_pass_td_share']
-        ).round()
-        
-        # Skill position receiving TDs
-        skill_mask = projections['position'].isin(['RB', 'WR', 'TE'])
-        projections.loc[skill_mask, 'proj_receiving_tds'] = (
-            team_totals['pass_tds'] * projections.loc[skill_mask, 'proj_pass_td_share']
+        # Receiving TDs for non-QBs
+        projections.loc[non_qb_mask, 'proj_receiving_tds'] = (
+            team_totals['pass_tds'] * projections.loc[non_qb_mask, 'proj_pass_td_share']
         ).round()
         
         # Rushing TDs (all positions)
@@ -115,10 +136,34 @@ class ProjectionCalculator:
             team_totals['rush_tds'] * projections['proj_rush_td_share']
         ).round()
         
-        # QB specific stats
-        projections.loc[qb_mask, 'proj_pass_attempts'] = team_totals['pass_attempts']
-        projections.loc[qb_mask, 'proj_pass_completions'] = team_totals['pass_completions']
-        projections.loc[qb_mask, 'proj_passing_yards'] = team_totals['pass_yards']
+        # QB specific stats - only for starting QB
+        projections['proj_pass_attempts'] = 0
+        projections['proj_pass_completions'] = 0
+        projections['proj_passing_yards'] = 0
+        projections['proj_passing_tds'] = 0
+        
+        qb_mask = projections['position'] == 'QB'
+        if qb_mask.any():
+            qb_projections = projections[qb_mask]
+            
+            # Find starting QB (depth_team = 1 or first QB)
+            starter_idx = None
+            if 'depth_team' in qb_projections.columns:
+                starter_mask = qb_projections['depth_team'] == 1
+                if starter_mask.any():
+                    starter_idx = qb_projections[starter_mask].index[0]
+            
+            if starter_idx is None:
+                # No depth info or no depth_team=1, use first QB
+                starter_idx = qb_projections.index[0]
+                
+            logger.info(f"Assigning passing stats to QB at index {starter_idx}")
+            
+            # Give all passing stats to starting QB
+            projections.loc[starter_idx, 'proj_pass_attempts'] = team_totals['pass_attempts']
+            projections.loc[starter_idx, 'proj_pass_completions'] = team_totals['pass_completions']
+            projections.loc[starter_idx, 'proj_passing_yards'] = team_totals['pass_yards']
+            projections.loc[starter_idx, 'proj_passing_tds'] = team_totals['pass_tds']
         
         # Clean up projections
         projections = self._clean_projections(projections)
@@ -153,6 +198,11 @@ class ProjectionCalculator:
         non_qb_mask = projections['position'] != 'QB'
         projections.loc[non_qb_mask, ['proj_pass_attempts', 'proj_pass_completions',
                                       'proj_passing_yards', 'proj_passing_tds']] = 0
+        
+        # QBs shouldn't have receiving stats
+        qb_mask = projections['position'] == 'QB'
+        projections.loc[qb_mask, ['proj_targets', 'proj_receptions',
+                                  'proj_receiving_yards', 'proj_receiving_tds']] = 0
         
         # Ensure receptions <= targets
         projections['proj_receptions'] = projections[['proj_receptions', 'proj_targets']].min(axis=1)
