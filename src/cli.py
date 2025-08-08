@@ -7,6 +7,7 @@ from .data import import_team_list, team_schedule_for_year
 from .predict import project_team_week, project_team_season
 from .utils import set_display
 from .simulate import simulate_from_point
+from .simulate_calibrated import simulate_from_point_calibrated
 
 def main():
     set_display()
@@ -92,13 +93,18 @@ def main():
         print(f"Saved: {path}")
 
     ans = input("Run Monte Carlo simulation? (yes/no): ").strip().lower()
-    if ans in ("y", "yes"):
+    if ans in ("y","yes"):
+        mode = input("Use calibrated Option B if available? (yes/no): ").strip().lower()
         s = input(f"Number of draws [{SIM_DEFAULT_DRAWS}]: ").strip()
         n_draws = int(s) if s else SIM_DEFAULT_DRAWS
         t = input(f"Seed [{SIM_DEFAULT_SEED}]: ").strip()
         sim_seed = int(t) if t else SIM_DEFAULT_SEED
 
-        sim_players, sim_team = simulate_from_point(df, team_pred, team, year, n_draws, sim_seed)
+        if mode in ("y","yes"):
+            sim_players, sim_team = simulate_from_point_calibrated(df, team_pred, team, year, n_draws, sim_seed)
+        else:
+            from .simulate import simulate_from_point
+            sim_players, sim_team = simulate_from_point(df, team_pred, team, year, n_draws, sim_seed)
 
         print(f"Monte Carlo summary (N={n_draws}, seed={sim_seed})")
         print(sim_team.to_string(index=False))
@@ -113,7 +119,7 @@ def main():
         print(sim_players[sim_cols].round(2).to_string(index=False))
 
         sv = input("Save simulation CSV to artifacts/? (yes/no): ").strip().lower()
-        if sv in ("y", "yes"):
+        if sv in ("y","yes"):
             os.makedirs(ARTIFACTS_DIR, exist_ok=True)
             sim_path = os.path.join(ARTIFACTS_DIR, f"sim_{team}_{year}_w{week}_{n_draws}.csv")
             sim_players.to_csv(sim_path, index=False)

@@ -33,3 +33,17 @@ SIM_SIGMA_FRAC = {
     "pass_yards": 0.15,
     "rush_yards": 0.18
 }
+
+SIM_CALIBRATION_FILE = "artifacts/sim_calibration.json"
+
+SIM_DEFAULT_RHO = [
+    [1.0, -0.35, 0.65, -0.25],
+    [-0.35, 1.0, -0.25, 0.55],
+    [0.65, -0.25, 1.0, -0.20],
+    [-0.25, 0.55, -0.20, 1.0],
+]
+
+SIM_NB_THETA = {
+    "pass_tds": 2.0,
+    "rush_tds": 1.5
+}
