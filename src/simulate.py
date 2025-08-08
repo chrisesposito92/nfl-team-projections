@@ -8,9 +8,11 @@ from .config import (
     SIM_SIGMA_FRAC,
     RECEIVING_POS,
     RUSHING_POS,
+    RESCALE_EPS,
 )
 from .data import load_depth_charts
 from .utils import allocate_total_by_weights
+
 
 def _dirichlet_sample(base_shares: np.ndarray, phi: float, rng: np.random.RandomState) -> np.ndarray:
     base = np.asarray(base_shares, dtype=float)
@@ -24,6 +26,7 @@ def _dirichlet_sample(base_shares: np.ndarray, phi: float, rng: np.random.Random
     alpha = np.maximum(base * float(phi), 1e-6)
     return rng.dirichlet(alpha)
 
+
 def _sample_team_totals(mu: Dict[str, float], rng: np.random.RandomState) -> Dict[str, float]:
     out = {}
     out["pass_attempts"] = max(0.0, rng.normal(mu["pass_attempts"], SIM_SIGMA_FRAC["pass_attempts"] * max(mu["pass_attempts"], 1.0)))
@@ -33,6 +36,7 @@ def _sample_team_totals(mu: Dict[str, float], rng: np.random.RandomState) -> Dic
     out["pass_tds"] = float(rng.poisson(max(mu["pass_tds"], 0.0)))
     out["rush_tds"] = float(rng.poisson(max(mu["rush_tds"], 0.0)))
     return out
+
 
 def _compute_eff_from_point(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
@@ -54,6 +58,7 @@ def _compute_eff_from_point(df: pd.DataFrame) -> pd.DataFrame:
 
     return x[["player_id", "catch_rate", "ypt", "rec_td_per_target", "yprush", "rush_td_per_att"]]
 
+
 def _qb1_index(df: pd.DataFrame, team: str, year: int) -> np.ndarray:
     qb_idx = df.index[df["position"] == "QB"].values
     if qb_idx.size == 0:
@@ -73,7 +78,24 @@ def _qb1_index(df: pd.DataFrame, team: str, year: int) -> np.ndarray:
         pass
     return np.array([qb_idx[0]])
 
-def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], team: str, year: int, n_draws: int, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
+def _safe_rescale_1d(x: np.ndarray, target: float) -> np.ndarray:
+    if x.size == 0:
+        return x
+    s = float(np.nansum(x))
+    if not np.isfinite(target) or target <= RESCALE_EPS or s <= RESCALE_EPS:
+        return np.zeros_like(x, dtype=float)
+    return (x.astype(float) * (float(target) / s))
+
+
+def simulate_from_point(
+    point_df: pd.DataFrame,
+    team_pred: Dict[str, float],
+    team: str,
+    year: int,
+    n_draws: int,
+    seed: int
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = point_df.copy()
     rng = np.random.RandomState(seed)
 
@@ -97,7 +119,6 @@ def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], tea
 
     qb1_idx = _qb1_index(df, team, year)
 
-    # Precompute per-receiver/per-rusher vectors (no divides in the loop)
     rx_cr = df.loc[rx_mask, "catch_rate"].to_numpy(dtype=float)
     rx_cr = np.clip(np.nan_to_num(rx_cr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
@@ -115,7 +136,17 @@ def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], tea
     ru_rtrate = df.loc[ru_mask, "rush_td_per_att"].to_numpy(dtype=float)
     ru_rtrate = np.clip(np.nan_to_num(ru_rtrate, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
-    stats = ["targets", "receptions", "rec_yards", "rec_tds", "rush_att", "rush_yards", "rush_tds", "pass_yards", "pass_tds"]
+    stats = [
+        "targets",
+        "receptions",
+        "rec_yards",
+        "rec_tds",
+        "rush_att",
+        "rush_yards",
+        "rush_tds",
+        "pass_yards",
+        "pass_tds",
+    ]
     agg = {s: [] for s in stats}
     team_agg = {k: [] for k in ["pass_attempts", "pass_yards", "pass_tds", "rush_attempts", "rush_yards", "rush_tds"]}
 
@@ -163,6 +194,14 @@ def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], tea
             qb_pass_tds[qb1_idx[0]] = t["pass_tds"]
         draw["pass_yards"] = qb_pass_yards
         draw["pass_tds"] = qb_pass_tds
+
+        if rx_idx.size > 0:
+            draw["rec_yards"][rx_idx] = _safe_rescale_1d(draw["rec_yards"][rx_idx], t["pass_yards"])
+            draw["rec_tds"][rx_idx] = _safe_rescale_1d(draw["rec_tds"][rx_idx], t["pass_tds"])
+
+        if ru_idx.size > 0:
+            draw["rush_yards"][ru_idx] = _safe_rescale_1d(draw["rush_yards"][ru_idx], t["rush_yards"])
+            draw["rush_tds"][ru_idx] = _safe_rescale_1d(draw["rush_tds"][ru_idx], t["rush_tds"])
 
         for s in stats:
             agg[s].append(draw[s])

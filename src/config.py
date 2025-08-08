@@ -47,3 +47,25 @@ SIM_NB_THETA = {
     "pass_tds": 2.0,
     "rush_tds": 1.5
 }
+
+# === Defense & game-script adjustment params ===
+ADJUSTMENTS_ENABLED = True
+DEF_LOOKBACK_SEASONS = 2  # how many prior seasons to use for defense profile
+
+# Multipliers per 1 std dev of opponent metric
+DEF_PASS_YDS_W = 0.06     # pass yards sensitivity to pass EPA allowed
+DEF_PASS_ATT_W = 0.03     # pass attempts sensitivity to neutral pass rate allowed
+DEF_PASS_TDS_W = 0.08     # pass TD sensitivity to pass EPA allowed
+
+DEF_RUSH_YDS_W = 0.06     # rush yards sensitivity to rush EPA allowed
+DEF_RUSH_ATT_W = 0.03     # rush attempts sensitivity to neutral pass rate allowed (negative)
+DEF_RUSH_TDS_W = 0.08     # rush TD sensitivity to rush EPA allowed
+
+# Home bonuses (additive to the multiplicative envelope above)
+HOME_BONUS_PASS_YDS = 0.02
+HOME_BONUS_PASS_ATT = 0.01
+HOME_BONUS_RUSH_YDS = 0.01
+HOME_BONUS_RUSH_ATT = 0.01
+
+# Numeric stability for rescaling
+RESCALE_EPS = 1e-9

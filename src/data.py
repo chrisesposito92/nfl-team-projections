@@ -1,5 +1,6 @@
 from __future__ import annotations
 import pandas as pd
+import numpy as np
 from typing import List
 from pathlib import Path
 from .utils import ensure_dir, stable_sort_values
@@ -103,3 +104,72 @@ def load_depth_charts(years: List[int]) -> pd.DataFrame:
         cols = ["dt","team","player_name","espn_id","gsis_id","pos_grp_id","pos_grp","pos_id","pos_name","pos_abb","pos_slot","pos_rank"]
         df = pd.DataFrame(columns=cols)
     return df
+
+def load_defense_profile(year: int, lookback_seasons: int) -> pd.DataFrame:
+    """
+    Build opponent defensive profile from prior seasons' play-by-play:
+    - pass_epa_allowed, rush_epa_allowed
+    - neutral_pass_rate_allowed (1st/2nd down, Q1-3, score diff within +/-7)
+    Returns a DataFrame indexed by defense team abbr with z-scored columns:
+      pass_epa_allowed_z, rush_epa_allowed_z, neutral_pass_rate_allowed_z
+    """
+    import nfl_data_py as nfl
+
+    start = max(2011, year - lookback_seasons)
+    years = list(range(start, year))  # prior seasons only
+    if not years:
+        years = [year - 1]
+
+    pbp = nfl.import_pbp_data(years)
+    df = pbp.copy()
+
+    # Ensure boolean flags exist/are numeric
+    if "pass" in df.columns:
+        df["pass"] = df["pass"].fillna(0).astype(int)
+    if "rush" in df.columns:
+        df["rush"] = df["rush"].fillna(0).astype(int)
+
+    # Keep only rush/pass plays
+    mask = (df.get("pass", 0) == 1) | (df.get("rush", 0) == 1)
+    df = df.loc[mask].copy()
+
+    # Pass and rush splits
+    pass_df = df[df["pass"] == 1].copy()
+    rush_df = df[df["rush"] == 1].copy()
+
+    # Neutral pass rate allowed (defensive view)
+    neutral = df[
+        df["down"].isin([1, 2])
+        & (df["qtr"] <= 3)
+        & (df["score_differential"].between(-7, 7))
+    ].copy()
+    neutral_agg = neutral.groupby("defteam").agg(
+        pass_plays=("pass", "sum"),
+        rush_plays=("rush", "sum"),
+    )
+    neutral_agg["neutral_pass_rate_allowed"] = neutral_agg["pass_plays"] / (
+        neutral_agg["pass_plays"] + neutral_agg["rush_plays"]
+    )
+
+    # Explosive not used in v1 adjustments, but kept if you want to extend
+    if "yards_gained" in pass_df.columns:
+        pass_df["explosive"] = (pass_df["yards_gained"] >= 20).astype(float)
+
+    out = pd.DataFrame(index=sorted(set(df["defteam"].dropna().unique())))
+    out["pass_epa_allowed"] = pass_df.groupby("defteam")["epa"].mean()
+    out["rush_epa_allowed"] = rush_df.groupby("defteam")["epa"].mean()
+    out = out.join(neutral_agg["neutral_pass_rate_allowed"])
+
+    out = out.replace([np.inf, -np.inf], np.nan)
+
+    # z-scores for adjustments
+    for col in ["pass_epa_allowed", "rush_epa_allowed", "neutral_pass_rate_allowed"]:
+        mu = out[col].mean()
+        sd = out[col].std(ddof=0)
+        if sd and sd > 0:
+            out[col + "_z"] = (out[col] - mu) / sd
+        else:
+            out[col + "_z"] = 0.0
+        out[col + "_z"] = out[col + "_z"].fillna(0.0)
+
+    return out

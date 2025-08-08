@@ -11,6 +11,9 @@ from .models_shares import ShareProjectionModel
 from .utils import ensure_dir, normalize_by_group_sum, allocate_total_by_weights, stable_sort_values
 from .data import active_roster_for_week, load_depth_charts
 from .config import SHARE_ROLLING_GAMES, RECEIVING_POS, RUSHING_POS, OFFENSE_POS, DEPTH_CHART_LIMITS
+from .adjust import adjust_team_totals
+from .config import RESCALE_EPS
+from .data import team_schedule_for_year  # if not already imported
 
 def _years_for_training(projection_year: int) -> List[int]:
     return list(range(START_SEASON, projection_year))
@@ -218,7 +221,7 @@ def _apply_efficiency_and_allocate(team_pred: Dict[str,float], shares_df: pd.Dat
     ]
     return out[keep].sort_values(["position","player_name"]).reset_index(drop=True)
 
-def project_team_week(projection_year: int, team: str, week: int) -> Tuple[pd.DataFrame, Dict[str,float]]:
+def project_team_week(projection_year: int, team: str, week: int) -> Tuple[pd.DataFrame, Dict[str, float]]:
     team_feats = _prep_team_training(projection_year)
     team_model = TeamProjectionModel(projection_year=projection_year, seed=SEED)
     team_model.fit(team_feats)
@@ -231,21 +234,25 @@ def project_team_week(projection_year: int, team: str, week: int) -> Tuple[pd.Da
     wk = sched[sched["week"] == week]
     if wk.empty:
         raise ValueError(f"No regular-season game found for {team} in week {week} of {projection_year}.")
-    opp = wk["opponent"].values[0]
-    is_home = int(wk["is_home"].values[0])
+    opp = str(wk["opponent"].iloc[0])
+    is_home_int = int(wk["is_home"].iloc[0])
+    is_home_bool = bool(is_home_int == 1)
 
-    team_row = _assemble_feature_row_for_match(team_feats, team_feats, team, opp, is_home, projection_year)
+    team_row = _assemble_feature_row_for_match(team_feats, team_feats, team, opp, is_home_int, projection_year)
     team_pred = team_model.predict(team_row)
 
-    roster_hist = share_df  # use training constructed history
-    roster = _roster_features_for_week(team, projection_year, week, roster_hist, is_home)
+    team_pred = adjust_team_totals(team_pred, opponent=opp, is_home=is_home_bool, year=projection_year)
+
+    roster_hist = share_df
+    roster = _roster_features_for_week(team, projection_year, week, roster_hist, is_home_int)
     roster["team"] = team
-    roster["is_home"] = is_home
+    roster["is_home"] = is_home_int
 
     shares_pred = share_model.predict_shares(roster)
     final = _apply_efficiency_and_allocate(team_pred, shares_pred, eff)
+    final = _enforce_identity_constraints(final, team_pred)
 
-    final = final.sort_values(["position","player_name"]).reset_index(drop=True)
+    final = final.sort_values(["position", "player_name"]).reset_index(drop=True)
     return final, team_pred
 
 def project_team_season(projection_year: int, team: str) -> pd.DataFrame:
@@ -262,3 +269,26 @@ def project_team_season(projection_year: int, team: str) -> pd.DataFrame:
         results.append(df)
     out = pd.concat(results, ignore_index=True)
     return out
+
+def _enforce_identity_constraints(df: pd.DataFrame, team_pred: dict) -> pd.DataFrame:
+    """
+    Rescales player columns so they sum exactly to team totals.
+    - Receiving yards/TDs across WR/RB/TE sum to team pass_yards/pass_tds.
+    - Rushing yards/TDs across QB/RB/WR/TE sum to team rush_yards/rush_tds.
+    """
+    def _rescale(mask: pd.Series, col: str, target: float):
+        s = float(df.loc[mask, col].sum())
+        if s > RESCALE_EPS and target is not None and np.isfinite(target):
+            df.loc[mask, col] = df.loc[mask, col] * (float(target) / s)
+        else:
+            df.loc[mask, col] = 0.0
+
+    rx_mask = df["position"].isin(["WR", "TE", "RB"])
+    rush_mask = df["position"].isin(["QB", "RB", "WR", "TE"])
+
+    _rescale(rx_mask, "proj_rec_yards", team_pred.get("pass_yards", 0.0))
+    _rescale(rx_mask, "proj_rec_tds",   team_pred.get("pass_tds", 0.0))
+    _rescale(rush_mask, "proj_rush_yards", team_pred.get("rush_yards", 0.0))
+    _rescale(rush_mask, "proj_rush_tds",   team_pred.get("rush_tds", 0.0))
+
+    return df
