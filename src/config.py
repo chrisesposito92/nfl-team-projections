@@ -20,3 +20,16 @@ DEPTH_CHART_LIMITS = {"QB": 1, "RB": 3, "WR": 4, "TE": 2}
 ARTIFACTS_DIR = "artifacts"
 TEAM_MODEL_DIRNAME = "team_models"
 SHARE_MODEL_DIRNAME = "share_models"
+
+SIM_DEFAULT_DRAWS = 1000
+SIM_DEFAULT_SEED = 42
+
+SIM_PHI_TARGET = 60.0
+SIM_PHI_RUSH = 40.0
+
+SIM_SIGMA_FRAC = {
+    "pass_attempts": 0.10,
+    "rush_attempts": 0.12,
+    "pass_yards": 0.15,
+    "rush_yards": 0.18
+}
