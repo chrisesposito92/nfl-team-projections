@@ -2,17 +2,26 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple
-from .config import SIM_PHI_TARGET, SIM_PHI_RUSH, SIM_SIGMA_FRAC, RECEIVING_POS, RUSHING_POS
+from .config import (
+    SIM_PHI_TARGET,
+    SIM_PHI_RUSH,
+    SIM_SIGMA_FRAC,
+    RECEIVING_POS,
+    RUSHING_POS,
+)
 from .data import load_depth_charts
 from .utils import allocate_total_by_weights
 
 def _dirichlet_sample(base_shares: np.ndarray, phi: float, rng: np.random.RandomState) -> np.ndarray:
-    base = base_shares.astype(float)
-    if base.sum() <= 0:
+    base = np.asarray(base_shares, dtype=float)
+    if base.size == 0:
+        return base
+    s = base.sum()
+    if not np.isfinite(s) or s <= 0:
         base = np.ones_like(base) / len(base)
     else:
-        base = base / base.sum()
-    alpha = np.maximum(base * phi, 1e-6)
+        base = base / s
+    alpha = np.maximum(base * float(phi), 1e-6)
     return rng.dirichlet(alpha)
 
 def _sample_team_totals(mu: Dict[str, float], rng: np.random.RandomState) -> Dict[str, float]:
@@ -32,10 +41,18 @@ def _compute_eff_from_point(df: pd.DataFrame) -> pd.DataFrame:
     x["rec_td_per_target"] = np.where(x["proj_targets"] > 0, x["proj_rec_tds"] / x["proj_targets"], np.nan)
     x["yprush"] = np.where(x["proj_rush_att"] > 0, x["proj_rush_yards"] / x["proj_rush_att"], np.nan)
     x["rush_td_per_att"] = np.where(x["proj_rush_att"] > 0, x["proj_rush_tds"] / x["proj_rush_att"], np.nan)
-    for col in ["catch_rate","ypt","rec_td_per_target","yprush","rush_td_per_att"]:
+
+    for col in ["catch_rate", "ypt", "rec_td_per_target", "yprush", "rush_td_per_att"]:
         pos_mean = x.groupby("position")[col].transform("mean")
         x[col] = x[col].fillna(pos_mean).fillna(0.0)
-    return x[["player_id","catch_rate","ypt","rec_td_per_target","yprush","rush_td_per_att"]]
+
+    x["catch_rate"] = np.clip(x["catch_rate"].astype(float), 0.0, 1.0)
+    x["ypt"] = np.maximum(x["ypt"].astype(float), 0.0)
+    x["rec_td_per_target"] = np.clip(x["rec_td_per_target"].astype(float), 0.0, 1.0)
+    x["yprush"] = np.maximum(x["yprush"].astype(float), 0.0)
+    x["rush_td_per_att"] = np.clip(x["rush_td_per_att"].astype(float), 0.0, 1.0)
+
+    return x[["player_id", "catch_rate", "ypt", "rec_td_per_target", "yprush", "rush_td_per_att"]]
 
 def _qb1_index(df: pd.DataFrame, team: str, year: int) -> np.ndarray:
     qb_idx = df.index[df["position"] == "QB"].values
@@ -59,22 +76,50 @@ def _qb1_index(df: pd.DataFrame, team: str, year: int) -> np.ndarray:
 def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], team: str, year: int, n_draws: int, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = point_df.copy()
     rng = np.random.RandomState(seed)
+
     eff = _compute_eff_from_point(df)
     df = df.merge(eff, on="player_id", how="left").fillna(0.0)
 
-    rx_mask = df["position"].isin(RECEIVING_POS)
-    ru_mask = df["position"].isin(RUSHING_POS)
-    rx_idx = df.index[rx_mask].values
-    ru_idx = df.index[ru_mask].values
-    base_rx = df.loc[rx_mask, "target_share"].values if "target_share" in df.columns else np.zeros(rx_idx.size)
-    base_ru = df.loc[ru_mask, "rush_attempt_share"].values if "rush_attempt_share" in df.columns else np.zeros(ru_idx.size)
+    rx_mask = df["position"].isin(RECEIVING_POS).values
+    ru_mask = df["position"].isin(RUSHING_POS).values
+    rx_idx = np.where(rx_mask)[0]
+    ru_idx = np.where(ru_mask)[0]
+
+    if "target_share" in df.columns:
+        base_rx = df.loc[rx_mask, "target_share"].to_numpy(dtype=float)
+    else:
+        base_rx = np.zeros(rx_idx.size, dtype=float)
+
+    if "rush_attempt_share" in df.columns:
+        base_ru = df.loc[ru_mask, "rush_attempt_share"].to_numpy(dtype=float)
+    else:
+        base_ru = np.zeros(ru_idx.size, dtype=float)
+
     qb1_idx = _qb1_index(df, team, year)
 
-    stats = ["targets","receptions","rec_yards","rec_tds","rush_att","rush_yards","rush_tds","pass_yards","pass_tds"]
-    agg = {s: [] for s in stats}
-    team_agg = {k: [] for k in ["pass_attempts","pass_yards","pass_tds","rush_attempts","rush_yards","rush_tds"]}
+    # Precompute per-receiver/per-rusher vectors (no divides in the loop)
+    rx_cr = df.loc[rx_mask, "catch_rate"].to_numpy(dtype=float)
+    rx_cr = np.clip(np.nan_to_num(rx_cr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
-    for _ in range(n_draws):
+    rx_ypt = df.loc[rx_mask, "ypt"].to_numpy(dtype=float)
+    rx_ypt = np.maximum(np.nan_to_num(rx_ypt, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+
+    rx_ypr = np.divide(rx_ypt, rx_cr, out=np.zeros_like(rx_ypt), where=(rx_cr > 0))
+
+    rx_rrate = df.loc[rx_mask, "rec_td_per_target"].to_numpy(dtype=float)
+    rx_rrate = np.clip(np.nan_to_num(rx_rrate, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+
+    ru_yprush = df.loc[ru_mask, "yprush"].to_numpy(dtype=float)
+    ru_yprush = np.maximum(np.nan_to_num(ru_yprush, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+
+    ru_rtrate = df.loc[ru_mask, "rush_td_per_att"].to_numpy(dtype=float)
+    ru_rtrate = np.clip(np.nan_to_num(ru_rtrate, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+
+    stats = ["targets", "receptions", "rec_yards", "rec_tds", "rush_att", "rush_yards", "rush_tds", "pass_yards", "pass_tds"]
+    agg = {s: [] for s in stats}
+    team_agg = {k: [] for k in ["pass_attempts", "pass_yards", "pass_tds", "rush_attempts", "rush_yards", "rush_tds"]}
+
+    for _ in range(int(n_draws)):
         t = _sample_team_totals(team_pred, rng)
         for k in team_agg.keys():
             team_agg[k].append(t[k])
@@ -85,26 +130,31 @@ def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], tea
             rx_share = _dirichlet_sample(base_rx, SIM_PHI_TARGET, rng)
             rx_targets = t["pass_attempts"] * rx_share
             draw["targets"][rx_idx] = rx_targets
-            cr = df.loc[rx_idx, "catch_rate"].values
-            ypt = df.loc[rx_idx, "ypt"].values
-            ypr = np.where(cr > 0, ypt / cr, 0.0)
-            n_binom = np.maximum(0, np.rint(rx_targets)).astype(int)
-            recs = rng.binomial(n=n_binom, p=np.clip(cr, 0.0, 1.0))
+
+            n_binom = np.maximum(0, np.rint(rx_targets)).astype(np.int64)
+            recs = rng.binomial(n=n_binom, p=rx_cr)
             draw["receptions"][rx_idx] = recs
-            draw["rec_yards"][rx_idx] = recs * ypr
-            rrate = df.loc[rx_idx, "rec_td_per_target"].values
-            weights_rec = rx_targets * rrate
-            draw["rec_tds"][rx_idx] = allocate_total_by_weights(t["pass_tds"], weights_rec)
+            draw["rec_yards"][rx_idx] = recs * rx_ypr
+
+            weights_rec = rx_targets * rx_rrate
+            if not np.isfinite(weights_rec.sum()) or weights_rec.sum() <= 0:
+                alloc_rec_tds = np.zeros_like(rx_targets)
+            else:
+                alloc_rec_tds = allocate_total_by_weights(t["pass_tds"], weights_rec)
+            draw["rec_tds"][rx_idx] = alloc_rec_tds
 
         if ru_idx.size > 0:
             ru_share = _dirichlet_sample(base_ru, SIM_PHI_RUSH, rng)
             ru_att = t["rush_attempts"] * ru_share
             draw["rush_att"][ru_idx] = ru_att
-            yprush = df.loc[ru_idx, "yprush"].values
-            draw["rush_yards"][ru_idx] = ru_att * yprush
-            rtrate = df.loc[ru_idx, "rush_td_per_att"].values
-            weights_rush = ru_att * rtrate
-            draw["rush_tds"][ru_idx] = allocate_total_by_weights(t["rush_tds"], weights_rush)
+            draw["rush_yards"][ru_idx] = ru_att * ru_yprush
+
+            weights_rush = ru_att * ru_rtrate
+            if not np.isfinite(weights_rush.sum()) or weights_rush.sum() <= 0:
+                alloc_rush_tds = np.zeros_like(ru_att)
+            else:
+                alloc_rush_tds = allocate_total_by_weights(t["rush_tds"], weights_rush)
+            draw["rush_tds"][ru_idx] = alloc_rush_tds
 
         qb_pass_yards = np.zeros(len(df), dtype=float)
         qb_pass_tds = np.zeros(len(df), dtype=float)
@@ -125,10 +175,10 @@ def simulate_from_point(point_df: pd.DataFrame, team_pred: Dict[str, float], tea
         out[f"{s}_p50"] = np.percentile(mat, 50, axis=0)
         out[f"{s}_p90"] = np.percentile(mat, 90, axis=0)
 
-    sim_players = df[["player_id","player_name","position"]].copy()
+    sim_players = df[["player_id", "player_name", "position"]].copy()
     for k, v in out.items():
         sim_players[k] = v
-    sim_players = sim_players.sort_values(["position","player_name"]).reset_index(drop=True)
+    sim_players = sim_players.sort_values(["position", "player_name"]).reset_index(drop=True)
 
     team_out = {}
     for k, arr in team_agg.items():
