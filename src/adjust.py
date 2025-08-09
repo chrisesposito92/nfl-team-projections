@@ -1,7 +1,7 @@
 from __future__ import annotations
 from functools import lru_cache
 import numpy as np
-from .data import load_defense_profile
+from .data import load_defense_profile, load_offense_redzone_profile
 from .config import (
     ADJUSTMENTS_ENABLED,
     DEF_LOOKBACK_SEASONS,
@@ -9,6 +9,7 @@ from .config import (
     DEF_RUSH_YDS_W, DEF_RUSH_ATT_W, DEF_RUSH_TDS_W,
     HOME_BONUS_PASS_YDS, HOME_BONUS_PASS_ATT,
     HOME_BONUS_RUSH_YDS, HOME_BONUS_RUSH_ATT,
+    RZ_LOOKBACK_SEASONS, PHI_PASS_MIN, PHI_PASS_MAX, PHI_RUSH_MIN, PHI_RUSH_MAX
 )
 
 @lru_cache(maxsize=8)
@@ -68,4 +69,27 @@ def adjust_team_totals(base: dict, opponent: str, is_home: bool, year: int) -> d
         out["rush_tds"] * (1.0 + DEF_RUSH_TDS_W * z_rush),
     )
 
+    return out
+
+@lru_cache(maxsize=8)
+def _rz_profile_cached(year: int):
+    return load_offense_redzone_profile(year, RZ_LOOKBACK_SEASONS)
+
+def apply_redzone_td_phi(team_pred: dict, team: str, year: int) -> dict:
+    """
+    Multiplies team pass_tds and rush_tds by offense red-zone phi multipliers.
+    """
+    prof = _rz_profile_cached(year)
+    if team not in prof.index:
+        return team_pred
+
+    out = dict(team_pred)
+    phi_pass = float(prof.loc[team, "phi_pass_td_rz"])
+    phi_rush = float(prof.loc[team, "phi_rush_td_rz"])
+
+    phi_pass = float(np.clip(phi_pass, PHI_PASS_MIN, PHI_PASS_MAX))
+    phi_rush = float(np.clip(phi_rush, PHI_RUSH_MIN, PHI_RUSH_MAX))
+
+    out["pass_tds"] = max(0.0, out.get("pass_tds", 0.0) * phi_pass)
+    out["rush_tds"] = max(0.0, out.get("rush_tds", 0.0) * phi_rush)
     return out

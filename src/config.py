@@ -69,3 +69,20 @@ HOME_BONUS_RUSH_ATT = 0.01
 
 # Numeric stability for rescaling
 RESCALE_EPS = 1e-9
+
+# === Red-zone TD calibration (phi) ===
+RZ_LOOKBACK_SEASONS = 2
+RZ_SHRINK_K = 150.0          # pseudo-attempts for shrinkage to league mean
+PHI_PASS_MIN = 0.85
+PHI_PASS_MAX = 1.15
+PHI_RUSH_MIN = 0.85
+PHI_RUSH_MAX = 1.15
+
+# === TD uncertainty scaling (sigma) for simulations ===
+SIGMA_LOOKBACK_SEASONS = 3
+SIGMA_SHRINK_GAMES = 8.0     # pseudo-games for shrinkage of per-team weekly TD SD
+SIGMA_FLOOR = 0.80
+SIGMA_CEIL = 1.20
+
+# Negative-binomial dispersion baseline for team TD draws
+TD_NB_ALPHA_BASE = 8.0

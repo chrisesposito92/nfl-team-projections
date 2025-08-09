@@ -173,3 +173,111 @@ def load_defense_profile(year: int, lookback_seasons: int) -> pd.DataFrame:
         out[col + "_z"] = out[col + "_z"].fillna(0.0)
 
     return out
+
+def load_offense_redzone_profile(year: int, lookback_seasons: int, shrink_k: float = 150.0) -> pd.DataFrame:
+    """
+    Returns per-offense red-zone TD rate multipliers (phi) vs league:
+      - phi_pass_td_rz
+      - phi_rush_td_rz
+    Using prior `lookback_seasons` regular seasons, with shrinkage to league average.
+    """
+    import nfl_data_py as nfl
+    start = max(2011, year - lookback_seasons)
+    years = list(range(start, year))
+    if not years:
+        years = [year - 1]
+
+    pbp = nfl.import_pbp_data(years)
+    df = pbp.copy()
+    if "season_type" in df.columns:
+        df = df[df["season_type"] == "REG"].copy()
+
+    df["pass"] = df.get("pass", 0).fillna(0).astype(int)
+    df["rush"] = df.get("rush", 0).fillna(0).astype(int)
+    df["pass_touchdown"] = df.get("pass_touchdown", 0).fillna(0).astype(int)
+    df["rush_touchdown"] = df.get("rush_touchdown", 0).fillna(0).astype(int)
+
+    if "yardline_100" not in df.columns:
+        raise RuntimeError("yardline_100 not found in pbp; update nfl_data_py.")
+
+    rz = df[df["yardline_100"] <= 20].copy()
+
+    pass_rz = rz[rz["pass"] == 1]
+    rush_rz = rz[rz["rush"] == 1]
+
+    p_agg = pass_rz.groupby("posteam").agg(
+        pass_att_rz=("pass", "sum"),
+        pass_td_rz=("pass_touchdown", "sum"),
+    )
+    r_agg = rush_rz.groupby("posteam").agg(
+        rush_att_rz=("rush", "sum"),
+        rush_td_rz=("rush_touchdown", "sum"),
+    )
+
+    out = p_agg.join(r_agg, how="outer").fillna(0.0)
+    league_pass_att = float(out["pass_att_rz"].sum())
+    league_pass_td = float(out["pass_td_rz"].sum())
+    league_rush_att = float(out["rush_att_rz"].sum())
+    league_rush_td = float(out["rush_td_rz"].sum())
+
+    mu_pass = (league_pass_td / league_pass_att) if league_pass_att > 0 else 0.0
+    mu_rush = (league_rush_td / league_rush_att) if league_rush_att > 0 else 0.0
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        shr_pass = (out["pass_td_rz"] + shrink_k * mu_pass) / (out["pass_att_rz"] + shrink_k)
+        shr_rush = (out["rush_td_rz"] + shrink_k * mu_rush) / (out["rush_att_rz"] + shrink_k)
+
+    phi_pass = np.where(mu_pass > 0.0, shr_pass / mu_pass, 1.0)
+    phi_rush = np.where(mu_rush > 0.0, shr_rush / mu_rush, 1.0)
+
+    out["phi_pass_td_rz"] = np.clip(phi_pass, 0.01, 100.0)
+    out["phi_rush_td_rz"] = np.clip(phi_rush, 0.01, 100.0)
+
+    return out[["phi_pass_td_rz", "phi_rush_td_rz"]]
+
+
+def load_team_scoring_sigma(
+    year: int,
+    lookback_seasons: int,
+    shrink_games: float = 8.0,
+    floor: float = 0.80,
+    ceil: float = 1.20,
+) -> pd.DataFrame:
+    """
+    Returns per-team sigma multiplier for offensive TD uncertainty (weekly SD),
+    shrunk to league average and clipped to [floor, ceil].
+    """
+    import nfl_data_py as nfl
+    start = max(2011, year - lookback_seasons)
+    years = list(range(start, year))
+    if not years:
+        years = [year - 1]
+
+    pbp = nfl.import_pbp_data(years)
+    df = pbp.copy()
+    if "season_type" in df.columns:
+        df = df[df["season_type"] == "REG"].copy()
+
+    df["pass_touchdown"] = df.get("pass_touchdown", 0).fillna(0).astype(int)
+    df["rush_touchdown"] = df.get("rush_touchdown", 0).fillna(0).astype(int)
+
+    grp = df.groupby(["season", "game_id", "posteam"]).agg(
+        off_tds=("pass_touchdown", "sum")
+    )
+    grp["off_tds"] += df.groupby(["season", "game_id", "posteam"]).agg(
+        add=("rush_touchdown", "sum")
+    )["add"]
+
+    # Per-team weekly SD
+    team_stats = grp.groupby("posteam")["off_tds"].agg(["std", "count"]).rename(columns={"std": "sd", "count": "n"})
+    league_sd = float(grp["off_tds"].std(ddof=1)) if grp["off_tds"].size > 1 else 1.0
+    if not np.isfinite(league_sd) or league_sd <= 0:
+        league_sd = 1.0
+
+    # Shrink and scale
+    shr_sd = (team_stats["sd"] * team_stats["n"] + league_sd * shrink_games) / (team_stats["n"] + shrink_games)
+    sigma = shr_sd / league_sd
+    sigma = sigma.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    sigma = np.clip(sigma, floor, ceil)
+
+    return sigma.to_frame(name="sigma_td")

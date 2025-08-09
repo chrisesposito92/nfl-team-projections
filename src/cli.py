@@ -1,17 +1,55 @@
 from __future__ import annotations
 import sys
 import os
+import numpy as np
 import pandas as pd
-from .config import TEAM_TARGETS, SIM_DEFAULT_DRAWS, SIM_DEFAULT_SEED, ARTIFACTS_DIR
+
+from .config import (
+    TEAM_TARGETS,
+    SIM_DEFAULT_DRAWS,
+    SIM_DEFAULT_SEED,
+    ARTIFACTS_DIR,
+    PHI_PASS_MIN,
+    PHI_PASS_MAX,
+    PHI_RUSH_MIN,
+    PHI_RUSH_MAX,
+)
 from .data import import_team_list, team_schedule_for_year
 from .predict import project_team_week, project_team_season
 from .utils import set_display
-from .simulate import simulate_from_point
-from .simulate_calibrated import simulate_from_point_calibrated
+from .simulate import simulate_from_point, _sigma_profile_cached
+from .adjust import _rz_profile_cached
+
+
+def _get_phi_sigma(team: str, year: int) -> tuple[float, float, float]:
+    try:
+        prof = _rz_profile_cached(year)
+        if team in prof.index:
+            phi_pass = float(prof.loc[team, "phi_pass_td_rz"])
+            phi_rush = float(prof.loc[team, "phi_rush_td_rz"])
+        else:
+            phi_pass = 1.0
+            phi_rush = 1.0
+    except Exception:
+        phi_pass = 1.0
+        phi_rush = 1.0
+    phi_pass = float(np.clip(phi_pass, PHI_PASS_MIN, PHI_PASS_MAX))
+    phi_rush = float(np.clip(phi_rush, PHI_RUSH_MIN, PHI_RUSH_MAX))
+
+    try:
+        sprof = _sigma_profile_cached(year)
+        sigma_td = float(sprof.loc[team, "sigma_td"]) if team in sprof.index else 1.0
+    except Exception:
+        sigma_td = 1.0
+
+    return phi_pass, phi_rush, sigma_td
+
 
 def main():
     set_display()
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
     print("NFL Offensive Projections Modeler (V1.0)")
+
     try:
         year = int(input("Enter projection year (e.g., 2025): ").strip())
     except Exception:
@@ -28,19 +66,22 @@ def main():
     full = input("Project full REGULAR season? (yes/no): ").strip().lower()
     if full in ("y", "yes"):
         print("Generating full-season projections...")
+        phi_p, phi_r, sigma_td = _get_phi_sigma(team, year)
+        print(f"Adjustments -> RZ φ_pass={phi_p:.3f}, φ_rush={phi_r:.3f}; TD σ={sigma_td:.3f}")
+
         proj = project_team_season(year, team)
         cols = [
-            "season","team","week","player_name","position",
-            "proj_targets","proj_receptions","proj_rec_yards","proj_rec_tds",
-            "proj_rush_att","proj_rush_yards","proj_rush_tds",
-            "proj_pass_yards","proj_pass_tds"
+            "season", "team", "week", "player_name", "position",
+            "proj_targets", "proj_receptions", "proj_rec_yards", "proj_rec_tds",
+            "proj_rush_att", "proj_rush_yards", "proj_rush_tds",
+            "proj_pass_yards", "proj_pass_tds",
         ]
         extras = [f"team_{t}" for t in TEAM_TARGETS]
-        cols = [c for c in cols + extras if c in proj.columns]
+        cols += extras
         print(proj[cols].round(2).to_string(index=False))
+
         out = input("Save CSV to artifacts/? (yes/no): ").strip().lower()
         if out in ("y", "yes"):
-            os.makedirs(ARTIFACTS_DIR, exist_ok=True)
             path = os.path.join(ARTIFACTS_DIR, f"projections_{team}_{year}_season.csv")
             proj.to_csv(path, index=False)
             print(f"Saved: {path}")
@@ -48,25 +89,20 @@ def main():
 
     sched = team_schedule_for_year(team, year)
     for i, r in enumerate(sched.itertuples(index=False), start=1):
-        loc = "vs" if getattr(r, "is_home", 0) == 1 else "@"
-        print(f"{i}. Week {getattr(r, 'week', i)} {loc} {getattr(r, 'opponent', '')}")
-
+        loc = "vs" if r.is_home == 1 else "@"
+        print(f"{i}. Week {r.week} {loc} {r.opponent}")
     try:
         pick = int(input("Select a week number: ").strip())
     except Exception:
         print("Invalid selection.")
         sys.exit(1)
-    if pick < 1 or pick > len(sched):
-        print("Invalid selection.")
-        sys.exit(1)
-
-    if "week" in sched.columns:
-        week = int(sched.iloc[pick - 1]["week"])
-    else:
-        week = pick
+    week = int(pick)
 
     print("Generating week projection...")
     df, team_pred = project_team_week(year, team, week)
+
+    phi_p, phi_r, sigma_td = _get_phi_sigma(team, year)
+    print(f"Adjustments -> RZ φ_pass={phi_p:.3f}, φ_rush={phi_r:.3f}; TD σ={sigma_td:.3f}")
 
     print("Predicted team totals:")
     for k, v in team_pred.items():
@@ -77,53 +113,40 @@ def main():
     print()
 
     cols = [
-        "player_name","position",
-        "proj_targets","proj_receptions","proj_rec_yards","proj_rec_tds",
-        "proj_rush_att","proj_rush_yards","proj_rush_tds",
-        "proj_pass_yards","proj_pass_tds"
+        "player_name", "position",
+        "proj_targets", "proj_receptions", "proj_rec_yards", "proj_rec_tds",
+        "proj_rush_att", "proj_rush_yards", "proj_rush_tds",
+        "proj_pass_yards", "proj_pass_tds",
     ]
-    cols = [c for c in cols if c in df.columns]
     print(df[cols].round(2).to_string(index=False))
 
     out = input("Save CSV to artifacts/? (yes/no): ").strip().lower()
     if out in ("y", "yes"):
-        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-        path = os.path.join(ARTIFACTS_DIR, f"projections_{team}_{year}_week{week}.csv")
+        path = os.path.join(ARTIFACTS_DIR, f"projections_{team}_{year}_w{week}.csv")
         df.to_csv(path, index=False)
         print(f"Saved: {path}")
 
-    ans = input("Run Monte Carlo simulation? (yes/no): ").strip().lower()
-    if ans in ("y","yes"):
-        mode = input("Use calibrated Option B if available? (yes/no): ").strip().lower()
-        s = input(f"Number of draws [{SIM_DEFAULT_DRAWS}]: ").strip()
-        n_draws = int(s) if s else SIM_DEFAULT_DRAWS
-        t = input(f"Seed [{SIM_DEFAULT_SEED}]: ").strip()
-        sim_seed = int(t) if t else SIM_DEFAULT_SEED
+    run_sim = input("Run Monte Carlo simulation from these point estimates? (yes/no): ").strip().lower()
+    if run_sim in ("y", "yes"):
+        draws_in = input(f"Number of draws [default {SIM_DEFAULT_DRAWS}]: ").strip()
+        seed_in = input(f"Random seed [default {SIM_DEFAULT_SEED}]: ").strip()
+        draws = int(draws_in) if draws_in else SIM_DEFAULT_DRAWS
+        seed = int(seed_in) if seed_in else SIM_DEFAULT_SEED
 
-        if mode in ("y","yes"):
-            sim_players, sim_team = simulate_from_point_calibrated(df, team_pred, team, year, n_draws, sim_seed)
-        else:
-            from .simulate import simulate_from_point
-            sim_players, sim_team = simulate_from_point(df, team_pred, team, year, n_draws, sim_seed)
+        team_summary, player_summary = simulate_from_point(
+            df, team_pred, draws=draws, seed=seed, team=team, year=year, week=week
+        )
 
-        print(f"Monte Carlo summary (N={n_draws}, seed={sim_seed})")
-        print(sim_team.to_string(index=False))
+        print(f"Monte Carlo summary (N={draws}, seed={seed})")
+        print(team_summary.round(3).to_string(index=False))
+        print(player_summary.round(3).to_string(index=False))
 
-        sim_cols = [
-            "player_name","position",
-            "targets_p50","receptions_p50","rec_yards_p50","rec_tds_p50",
-            "rush_att_p50","rush_yards_p50","rush_tds_p50",
-            "pass_yards_p50","pass_tds_p50"
-        ]
-        sim_cols = [c for c in sim_cols if c in sim_players.columns]
-        print(sim_players[sim_cols].round(2).to_string(index=False))
+        out_sim = input("Save simulation CSV to artifacts/? (yes/no): ").strip().lower()
+        if out_sim in ("y", "yes"):
+            path = os.path.join(ARTIFACTS_DIR, f"sim_{team}_{year}_w{week}_{draws}.csv")
+            player_summary.to_csv(path, index=False)
+            print(f"Saved: {path}")
 
-        sv = input("Save simulation CSV to artifacts/? (yes/no): ").strip().lower()
-        if sv in ("y","yes"):
-            os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-            sim_path = os.path.join(ARTIFACTS_DIR, f"sim_{team}_{year}_w{week}_{n_draws}.csv")
-            sim_players.to_csv(sim_path, index=False)
-            print(f"Saved: {sim_path}")
 
 if __name__ == "__main__":
     main()
