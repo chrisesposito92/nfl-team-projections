@@ -14,6 +14,10 @@ BASE_TEMPO_SEC = 28.0
 HURRY_TEMPO_SEC = 18.0
 NOHUDDLE_TEMPO_SEC = 24.0
 
+# Out-of-bounds tweak (Phase‑1): slightly less time between snaps if play ends OOB
+OOB_RUNOFF_BONUS_SEC = 3.0   # shave ~3s when play ends OOB (not incomplete)
+MIN_BURN_AFTER_PLAY   = 6.0  # never burn less than 6s on a completed in-bounds/out-of-bounds play
+
 # Incomplete pass costs ~6 seconds (play time) but otherwise does not burn play clock.
 INCOMPLETE_PLAY_TIME = 6.0
 

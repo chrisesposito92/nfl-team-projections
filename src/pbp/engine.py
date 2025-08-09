@@ -255,7 +255,12 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
                 "is_complete": True, "is_sack": False,
                 "is_interception": False, "is_fumble": False,
             }))
-            burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+            burn_clock_seconds(
+                st,
+                base_seconds=outcome["time_elapsed"],
+                incomplete=False,
+                oob=(not bool(outcome.get("in_bounds", True))),
+            )
             st.advance_down(new_y, int(round(gained)))
             continue
 
