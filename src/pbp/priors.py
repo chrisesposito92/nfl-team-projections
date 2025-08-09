@@ -167,3 +167,57 @@ def build_game_priors(home: str, away: str, year: int) -> GamePriors:
         home=get_team_priors(home, year),
         away=get_team_priors(away, year),
     )
+
+def _project_team_totals(team: str, year: int) -> Optional[dict]:
+    """
+    Best-effort wrapper around your Option B++ projection code.
+    Expects a dict with keys like 'pass_attempts', 'rush_attempts', etc.
+    Falls back cleanly if not available.
+    """
+    try:
+        # Your pipeline normally provides this
+        from ..predict import project_team_week  # type: ignore
+    except Exception:
+        return None
+
+    # Try a couple of signatures/args that exist in your codebase
+    for wk in (None, 0, 1):
+        try:
+            res = project_team_week(year, team, wk)  # type: ignore
+            # Common pattern in your repo: (df, team_pred)
+            if isinstance(res, tuple) and len(res) >= 2 and isinstance(res[1], dict):
+                return res[1]
+        except TypeError:
+            # Different signature? try next
+            continue
+        except Exception:
+            # Any other failure: give up gracefully
+            return None
+    return None
+
+def maybe_build_game_anchors(home: str, away: str, year: int) -> Optional[dict]:
+    """
+    Returns anchors or None:
+    {
+      "home": {"pass_attempts": float, "rush_attempts": float, "plays": float, "rush_rate": float},
+      "away": {...}
+    }
+    """
+    h = _project_team_totals(home, year)
+    a = _project_team_totals(away, year)
+    if h is None or a is None:
+        return None
+
+    def _pack(tp: dict) -> dict:
+        pa = float(tp.get("pass_attempts", 34.0))
+        ra = float(tp.get("rush_attempts", 26.0))
+        plays = max(30.0, pa + ra)
+        rr = ra / plays if plays > 0 else 0.45
+        return {
+            "pass_attempts": pa,
+            "rush_attempts": ra,
+            "plays": plays,
+            "rush_rate": rr,
+        }
+
+    return {"home": _pack(h), "away": _pack(a)}

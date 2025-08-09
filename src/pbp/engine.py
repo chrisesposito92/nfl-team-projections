@@ -7,8 +7,9 @@ from .config import (
     REGULATION_QUARTERS, QTR_SECONDS, MAX_PLAYS_HARD, TD_POINTS, FG_POINTS,
     BASE_TEMPO_SEC
 )
+from .config import PENALTY_RATE, PENALTY_OFFENSE_YDS, PENALTY_DEFENSE_YDS, PENALTY_DEF_AUTO_FIRST_PROB, PENALTY_TIME_SEC
 from .state import GameState, start_state
-from .priors import GamePriors, TeamPriors
+from .priors import GamePriors, TeamPriors, build_game_priors, maybe_build_game_anchors
 from .policies import choose_play_type
 from .play_models import sim_pass, sim_run
 from .special_teams import punt_net_yards, field_goal_attempt, kickoff
@@ -325,13 +326,232 @@ def simulate_game(
     year: int,
     n_sims: int = 1,
     seed: int = 42,
-    priors: Optional[GamePriors] = None
+    priors: Optional[GamePriors] = None,
 ) -> List[pd.DataFrame]:
-    rng_base = np.random.RandomState(seed)
+    """
+    Lightweight per-play sim used by the CLI.
+    Phase-1 additions:
+      - is_penalty / penalty_yards placeholders (no types yet)
+      - Option B++ 'soft' anchors (plays + rush rate) if available
+      - Incomplete clock logic already wired; OOB flag still not affecting time
+    """
+    rng = np.random.RandomState(seed)
+    sims: List[pd.DataFrame] = []
+
+    # Team priors
     if priors is None:
         priors = build_game_priors(home, away, year)
-    sims: List[pd.DataFrame] = []
-    for i in range(int(n_sims)):
-        rng = np.random.RandomState(rng_base.randint(0, 2**31 - 1))
-        sims.append(simulate_single_game(home, away, year, rng=rng, priors=priors))
+
+    # Try to get Option B++ anchors; fall back if missing
+    anchors = maybe_build_game_anchors(home, away, year)
+
+    # Pace and run-rate baselines
+    if anchors is not None:
+        pace_plays = int(np.clip(anchors["home"]["plays"] + anchors["away"]["plays"], 90, 160))
+        run_rate_home = float(np.clip(anchors["home"]["rush_rate"], 0.20, 0.70))
+        run_rate_away = float(np.clip(anchors["away"]["rush_rate"], 0.20, 0.70))
+    else:
+        pace_plays = 120
+        run_rate_home = 0.42
+        run_rate_away = 0.40
+
+    # Pass mechanics from priors
+    p_sack_base_home = float(np.clip(priors.home.sack_rate, 0.03, 0.12))
+    p_sack_base_away = float(np.clip(priors.away.sack_rate, 0.03, 0.12))
+    p_comp_home = float(np.clip(priors.home.comp_exp + priors.home.cpoe, 0.50, 0.75))
+    p_comp_away = float(np.clip(priors.away.comp_exp + priors.away.cpoe, 0.50, 0.75))
+
+    for _ in range(n_sims):
+        rows = []
+        off = away
+        defn = home
+        home_score = 0.0
+        away_score = 0.0
+        clock = 15 * 60
+        qtr = 1
+        yardline = 25
+        down = 1
+        dist = 10
+        drive_id = 1
+        play_id = 1
+
+        for __ in range(int(pace_plays)):
+            # end-of-game guard
+            if qtr > 4:
+                break
+
+            is_home_off = (off == home)
+            run_rate = run_rate_home if is_home_off else run_rate_away
+            p_sack_base = p_sack_base_home if is_home_off else p_sack_base_away
+            p_comp = p_comp_home if is_home_off else p_comp_away
+
+            long = (dist >= 8)
+            # slightly adaptive run rate
+            adj_run_rate = np.clip(run_rate - 0.10 * long + 0.05 * (down == 1), 0.15, 0.80)
+            call_run = (rng.rand() < adj_run_rate)
+
+            play_type = "run"
+            is_sack = False
+            is_complete = False
+            is_interception = False
+            is_fumble = False
+            yards = 0.0
+            result = "RUN"
+
+            if not call_run:
+                play_type = "pass"
+                # sack pressure a bit higher on long
+                p_sack = np.clip(p_sack_base * (1.00 + 0.25 * long), 0.01, 0.20)
+                if rng.rand() < p_sack:
+                    is_sack = True
+                    yards = -float(np.clip(rng.normal(6.5, 2.0), 2.0, 12.0))
+                    result = "SACK"
+                else:
+                    is_complete = (rng.rand() < p_comp)
+                    if is_complete:
+                        mu = 6.5 + 6.0 * long
+                        sd = 6.0 + 3.0 * long
+                        yards = float(np.clip(rng.normal(mu, sd), -3.0, 55.0))
+                        result = "COMPLETE"
+                        # rare fumble after catch (placeholder rate)
+                        is_fumble = bool(rng.rand() < 0.01)
+                        if is_fumble:
+                            result = "FUMBLE-LOST"
+                    else:
+                        yards = 0.0
+                        result = "INCOMPLETE"
+                        # rare int on incompletion (placeholder)
+                        is_interception = bool(rng.rand() < 0.02)
+                        if is_interception:
+                            result = "INT"
+            else:
+                mu = 4.3 - 1.0 * long + 0.7 * (down == 1)
+                sd = 3.0
+                yards = float(np.clip(rng.normal(mu, sd), -4.0, 35.0))
+                result = "RUN"
+                # rare fumble on run
+                is_fumble = bool(rng.rand() < 0.01)
+                if is_fumble:
+                    result = "FUMBLE-LOST"
+
+            # ----- Penalty (placeholder) -----
+            is_penalty = False
+            penalty_on = ""
+            penalty_yards = 0.0
+            auto_first = False
+            if rng.rand() < PENALTY_RATE:
+                is_penalty = True
+                if rng.rand() < 0.5:
+                    # defensive penalty
+                    penalty_on = "defense"
+                    penalty_yards = float(PENALTY_DEFENSE_YDS)
+                    auto_first = bool(rng.rand() < PENALTY_DEF_AUTO_FIRST_PROB and play_type == "pass")
+                else:
+                    # offensive penalty
+                    penalty_on = "offense"
+                    penalty_yards = float(PENALTY_OFFENSE_YDS)
+
+            # yardline movement (play yards + penalty yards; simplified enforcement)
+            nonneg_gain = max(0.0, yards)
+            total_gain = nonneg_gain + (penalty_yards if is_penalty else 0.0)
+            new_yardline = float(np.clip(yardline + total_gain, 1.0, 99.0))
+
+            # first down logic (simple; auto-first on some defensive penalties)
+            got_first_by_play = (nonneg_gain >= dist)
+            got_first_by_pen = bool(is_penalty and penalty_on == "defense" and (auto_first or penalty_yards >= dist))
+            first_down = got_first_by_play or got_first_by_pen
+
+            points = 0.0
+            # TD on the play (penalties can still bring you short in real life; placeholder allows it)
+            if new_yardline >= 100.0:
+                points = 7.0
+                new_yardline = 25.0
+                down = 1
+                dist = 10.0
+                drive_id += 1
+                off, defn = defn, off
+            else:
+                # basic clock burn
+                # incomplete passes already zero yards; we still burn generic time here.
+                # (OOB not affecting clock yet per scope.)
+                clock -= int(np.clip(np.random.normal(25, 8), 15, 45))
+                if is_penalty:
+                    clock -= int(PENALTY_TIME_SEC)
+
+                if clock <= 0:
+                    qtr += 1
+                    clock = 15 * 60
+                    if qtr > 4:
+                        # end row
+                        rows.append({
+                            "qtr": 4, "clock": "00:00", "offense": off, "defense": defn,
+                            "down": int(down), "dist": float(dist), "yardline": int(yardline),
+                            "drive_id": int(drive_id), "play_id": int(play_id),
+                            "play_type": "END", "yards_gained": np.nan, "result": "END",
+                            "points": 0.0, "home": home, "away": away,
+                            "home_score": home_score, "away_score": away_score,
+                            "is_pass": False, "is_run": False,
+                            "is_complete": False, "is_sack": False,
+                            "is_interception": False, "is_fumble": False,
+                            "is_penalty": False, "penalty_on": "", "penalty_yards": 0.0,
+                        })
+                        break
+
+                # turnover on downs (placeholder) if 4th & fail
+                if (play_type in ("run", "pass")) and not first_down and down == 4:
+                    # change possession at current spot (post-penalty)
+                    off, defn = defn, off
+                    new_yardline = 100.0 - new_yardline
+                    down = 1
+                    dist = 10.0
+                    drive_id += 1
+                else:
+                    # advance or set next down/dist
+                    if first_down:
+                        down = 1
+                        dist = 10.0
+                    else:
+                        down = 4 if down == 3 else (down + 1)
+                        dist = max(1.0, dist - nonneg_gain)
+
+            # scoring
+            if off == home:
+                home_score += points
+            else:
+                away_score += points
+
+            rows.append({
+                "qtr": int(qtr),
+                "clock": f"{int(clock // 60):02d}:{int(clock % 60):02d}",
+                "offense": off,
+                "defense": defn,
+                "down": int(down),
+                "dist": float(dist),
+                "yardline": int(max(1, min(99, new_yardline))),
+                "drive_id": int(drive_id),
+                "play_id": int(play_id),
+                "play_type": play_type,
+                "yards_gained": float(yards),
+                "result": result,
+                "points": float(points),
+                "home": home,
+                "away": away,
+                "home_score": float(home_score),
+                "away_score": float(away_score),
+                "is_pass": (play_type == "pass"),
+                "is_run": (play_type == "run"),
+                "is_complete": bool(is_complete) if play_type == "pass" else False,
+                "is_sack": bool(is_sack) if play_type == "pass" else False,
+                "is_interception": bool(is_interception),
+                "is_fumble": bool(is_fumble),
+                "is_penalty": bool(is_penalty),
+                "penalty_on": penalty_on if is_penalty else "",
+                "penalty_yards": float(penalty_yards) if is_penalty else 0.0,
+            })
+
+            yardline = int(max(1, min(99, new_yardline)))
+            play_id += 1
+
+        sims.append(pd.DataFrame(rows))
+
     return sims

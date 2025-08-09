@@ -66,3 +66,11 @@ FG_B_DIST = -0.13
 TD_POINTS = 7
 FG_POINTS = 3
 SAFETY_POINTS = 2  # not modeled in MVP, placeholder
+
+# --------- Penalties (Phase-1 placeholder) ----------
+# Simple, global rates. We don't model types yet; just side + yards.
+PENALTY_RATE = 0.06            # per scrimmage play
+PENALTY_OFFENSE_YDS = -10      # assessed from previous spot (sign from offense POV)
+PENALTY_DEFENSE_YDS = 5        # generic defensive penalty (no DPI special case yet)
+PENALTY_DEF_AUTO_FIRST_PROB = 0.10  # chance a defensive penalty grants automatic first down
+PENALTY_TIME_SEC = 5.0         # extra seconds to burn when a penalty is enforced
