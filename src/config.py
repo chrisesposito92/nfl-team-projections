@@ -21,7 +21,7 @@ ARTIFACTS_DIR = "artifacts"
 TEAM_MODEL_DIRNAME = "team_models"
 SHARE_MODEL_DIRNAME = "share_models"
 
-SIM_DEFAULT_DRAWS = 1000
+SIM_DEFAULT_DRAWS = 10000
 SIM_DEFAULT_SEED = 42
 
 SIM_PHI_TARGET = 60.0
@@ -86,3 +86,12 @@ SIGMA_CEIL = 1.20
 
 # Negative-binomial dispersion baseline for team TD draws
 TD_NB_ALPHA_BASE = 8.0
+
+# Efficiency sampling knobs (optional)
+EFF_RX_LOGIT_SD      = 0.35   # baseline logit sd for catch rate draws
+EFF_YPT_CV           = 0.35   # baseline coefficient of variation for YPT
+EFF_RUSH_YPC_CV      = 0.25   # baseline CV for rush YPC
+EFF_EXPOSURE_SHRINK  = 8.0    # exposure N0 in the shrink term sqrt(1 + exposure/N0)
+EFF_RHO_RX           = -0.35  # negative corr between CR and YPT (aDOT-like)
+EFF_YPR_MAX          = 35.0   # hard cap for yards per reception
+EFF_RUSH_YPC_MAX     = 9.0    # hard cap for rush yards per carry

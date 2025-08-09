@@ -106,7 +106,6 @@ def _safe_rescale_1d(x: np.ndarray, target: float) -> np.ndarray:
         return np.zeros_like(x, dtype=float)
     return (x.astype(float) * (float(target) / s))
 
-
 def simulate_from_point(
     point_df: pd.DataFrame,
     team_pred: Dict[str, float],
@@ -117,14 +116,18 @@ def simulate_from_point(
     seed: int | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Monte Carlo from point estimates with:
+    Monte Carlo from point estimates with FULL efficiency sampling:
       - Dirichlet allocation for targets/rush attempts
-      - Red-zone TD tilt via team φ (phi) for pass/rush TDs
-      - TD overdispersion via team σ (sigma) using Gamma-Poisson (NegBin)
-      - Numerically safe ops (no divide-by-zero warnings)
+      - Logit-normal catch rate sampling (Beta-like without SciPy)
+      - Lognormal YPT (=> YPR) sampling for receivers
+      - Lognormal YPC sampling for rushers
+      - Correlation between CR and YPT (aDOT-like), exposure-based shrink
+      - Team-level TD overdispersion (Gamma-Poisson) and red-zone φ tilt
+      - Sum-to-team reconciliation per draw
+
     Returns (team_summary, player_summary).
     """
-    # Lazy imports for defaults & constants to avoid import-time NameError
+    # Lazy imports for defaults & constants (avoid import-time failures)
     from .config import (
         SIM_DEFAULT_DRAWS,
         SIM_DEFAULT_SEED,
@@ -137,6 +140,27 @@ def simulate_from_point(
     )
     from .adjust import _rz_profile_cached
 
+    # Optional efficiency sampling knobs (fallbacks if not in config.py)
+    try:
+        from .config import (
+            EFF_RX_LOGIT_SD,          # baseline logit sd for CR
+            EFF_YPT_CV,               # baseline CV for YPT
+            EFF_RUSH_YPC_CV,          # baseline CV for rush YPC
+            EFF_EXPOSURE_SHRINK,      # larger => stronger shrink with volume
+            EFF_RHO_RX,               # corr(CR, YPT) via Gaussian copula (negative)
+            EFF_YPR_MAX,              # hard cap on yards/reception to prevent wild tails
+            EFF_RUSH_YPC_MAX,         # hard cap on rush YPC
+        )
+    except Exception:
+        # Sensible defaults if those keys are not present in config.py
+        EFF_RX_LOGIT_SD = 0.35
+        EFF_YPT_CV = 0.35
+        EFF_RUSH_YPC_CV = 0.25
+        EFF_EXPOSURE_SHRINK = 8.0
+        EFF_RHO_RX = -0.35
+        EFF_YPR_MAX = 35.0
+        EFF_RUSH_YPC_MAX = 9.0
+
     # Resolve defaults
     if draws is None:
         draws = SIM_DEFAULT_DRAWS
@@ -146,7 +170,7 @@ def simulate_from_point(
     df = point_df.copy()
     rng = np.random.RandomState(int(seed))
 
-    # Merge per-player efficiency computed from the point estimates
+    # Merge per-player efficiency computed from the point estimates (safe + clipped)
     eff = _compute_eff_from_point(df)
     df = df.merge(eff, on="player_id", how="left").fillna(0.0)
 
@@ -157,10 +181,16 @@ def simulate_from_point(
     ru_idx = np.where(ru_mask)[0]
 
     # Base shares (fallback to zeros if missing)
-    base_rx = df.loc[rx_mask, "target_share"].to_numpy(dtype=float) if "target_share" in df.columns else np.zeros(rx_idx.size, dtype=float)
-    base_ru = df.loc[ru_mask, "rush_attempt_share"].to_numpy(dtype=float) if "rush_attempt_share" in df.columns else np.zeros(ru_idx.size, dtype=float)
+    base_rx = (
+        df.loc[rx_mask, "target_share"].to_numpy(dtype=float)
+        if "target_share" in df.columns else np.zeros(rx_idx.size, dtype=float)
+    )
+    base_ru = (
+        df.loc[ru_mask, "rush_attempt_share"].to_numpy(dtype=float)
+        if "rush_attempt_share" in df.columns else np.zeros(ru_idx.size, dtype=float)
+    )
 
-    # Red-zone shares (try multiple common names; fallback to zeros)
+    # Helper to grab first available RZ share column
     def _get_first_available(mask: np.ndarray, cols: list[str]) -> np.ndarray:
         for c in cols:
             if c in df.columns:
@@ -168,30 +198,43 @@ def simulate_from_point(
                 return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         return np.zeros(mask.sum(), dtype=float)
 
+    # Red-zone shares (if present)
     rz_rx_share = _get_first_available(rx_mask, ["rz_target_share", "target_share_rz", "rz_tgt_share"])
     rz_ru_share = _get_first_available(ru_mask, ["rz_rush_share", "rush_attempt_share_rz", "rz_att_share"])
 
     # QB1 index for passing attribution
     qb1_idx = _qb1_index(df, team, year)
 
-    # Receiving efficiencies (safe, clipped)
-    rx_cr = df.loc[rx_mask, "catch_rate"].to_numpy(dtype=float) if "catch_rate" in df.columns else np.zeros(rx_idx.size, dtype=float)
-    rx_cr = np.clip(np.nan_to_num(rx_cr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    # Receiving base efficiencies (safe, clipped)
+    rx_cr_base = (
+        df.loc[rx_mask, "catch_rate"].to_numpy(dtype=float)
+        if "catch_rate" in df.columns else np.zeros(rx_idx.size, dtype=float)
+    )
+    rx_cr_base = np.clip(np.nan_to_num(rx_cr_base, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
-    rx_ypt = df.loc[rx_mask, "ypt"].to_numpy(dtype=float) if "ypt" in df.columns else np.zeros(rx_idx.size, dtype=float)
-    rx_ypt = np.maximum(np.nan_to_num(rx_ypt, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    rx_ypt_base = (
+        df.loc[rx_mask, "ypt"].to_numpy(dtype=float)
+        if "ypt" in df.columns else np.zeros(rx_idx.size, dtype=float)
+    )
+    rx_ypt_base = np.maximum(np.nan_to_num(rx_ypt_base, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
 
-    # Safe division: ypr = ypt / cr  (0 if cr == 0)
-    rx_ypr = np.divide(rx_ypt, rx_cr, out=np.zeros_like(rx_ypt), where=(rx_cr > 0))
-
-    rx_rrate = df.loc[rx_mask, "rec_td_per_target"].to_numpy(dtype=float) if "rec_td_per_target" in df.columns else np.zeros(rx_idx.size, dtype=float)
+    rx_rrate = (
+        df.loc[rx_mask, "rec_td_per_target"].to_numpy(dtype=float)
+        if "rec_td_per_target" in df.columns else np.zeros(rx_idx.size, dtype=float)
+    )
     rx_rrate = np.clip(np.nan_to_num(rx_rrate, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
-    # Rushing efficiencies (safe, clipped)
-    ru_yprush = df.loc[ru_mask, "yprush"].to_numpy(dtype=float) if "yprush" in df.columns else np.zeros(ru_idx.size, dtype=float)
-    ru_yprush = np.maximum(np.nan_to_num(ru_yprush, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    # Rushing base efficiencies (safe, clipped)
+    ru_yprush_base = (
+        df.loc[ru_mask, "yprush"].to_numpy(dtype=float)
+        if "yprush" in df.columns else np.zeros(ru_idx.size, dtype=float)
+    )
+    ru_yprush_base = np.maximum(np.nan_to_num(ru_yprush_base, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
 
-    ru_rtrate = df.loc[ru_mask, "rush_td_per_att"].to_numpy(dtype=float) if "rush_td_per_att" in df.columns else np.zeros(ru_idx.size, dtype=float)
+    ru_rtrate = (
+        df.loc[ru_mask, "rush_td_per_att"].to_numpy(dtype=float)
+        if "rush_td_per_att" in df.columns else np.zeros(ru_idx.size, dtype=float)
+    )
     ru_rtrate = np.clip(np.nan_to_num(ru_rtrate, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
     # Team-level φ (red-zone tilt) and σ (TD overdispersion)
@@ -217,7 +260,7 @@ def simulate_from_point(
         sigma_td = 1.0
     sigma_td = float(max(0.0, sigma_td))
 
-    # Helper: sample TD totals with overdispersion (Gamma-Poisson => NegBin)
+    # Helper: sample TD totals with overdispersion (Gamma-Poisson => NegBin-like)
     def _sample_tds_nb(mean_td: float) -> float:
         m = max(0.0, float(mean_td))
         if m == 0.0:
@@ -228,43 +271,76 @@ def simulate_from_point(
         lam = rng.gamma(shape=r, scale=m / r)
         return float(rng.poisson(max(0.0, lam)))
 
+    # Safe helpers for transforms
+    def _inv_logit(z: np.ndarray) -> np.ndarray:
+        return 1.0 / (1.0 + np.exp(-z))
+
     # Stats to aggregate
     stats = [
-        "targets",
-        "receptions",
-        "rec_yards",
-        "rec_tds",
-        "rush_att",
-        "rush_yards",
-        "rush_tds",
-        "pass_yards",
-        "pass_tds",
+        "targets", "receptions", "rec_yards", "rec_tds",
+        "rush_att", "rush_yards", "rush_tds",
+        "pass_yards", "pass_tds",
     ]
     agg = {s: [] for s in stats}
     team_agg = {k: [] for k in ["pass_attempts", "pass_yards", "pass_tds", "rush_attempts", "rush_yards", "rush_tds"]}
 
     for _ in range(int(draws)):
+        # Team totals (incl. yardage normals & TD NegBin draw)
         t = _sample_team_totals(team_pred, rng)
-
-        # Replace TD totals with σ-calibrated draws (keeps means at team_pred)
         t["pass_tds"] = _sample_tds_nb(team_pred.get("pass_tds", t.get("pass_tds", 0.0)))
         t["rush_tds"] = _sample_tds_nb(team_pred.get("rush_tds", t.get("rush_tds", 0.0)))
 
         for k in team_agg.keys():
             team_agg[k].append(t.get(k, 0.0))
 
+        # Per-draw containers
         draw = {s: np.zeros(len(df), dtype=float) for s in stats}
 
-        # Receiving draw
+        # -------- Receiving draw (shares + efficiency sampling) --------
         if rx_idx.size > 0:
+            # Shares -> targets
             rx_share = _dirichlet_sample(base_rx, SIM_PHI_TARGET, rng)
             rx_targets = max(0.0, t["pass_attempts"]) * rx_share
             draw["targets"][rx_idx] = rx_targets
 
+            # Exposure-based shrink factors
+            exp_shrink = np.sqrt(1.0 + rx_targets / max(EFF_EXPOSURE_SHRINK, 1e-6))
+            s_cr = EFF_RX_LOGIT_SD / exp_shrink  # logit sd for CR
+            cv_ypt = EFF_YPT_CV / exp_shrink     # CV for YPT
+            sigma_ypt = np.sqrt(np.log1p(np.square(np.clip(cv_ypt, 0.0, 10.0))))
+
+            # Correlated shocks per player
+            z_common = rng.normal(size=rx_idx.size)
+            eps1 = rng.normal(size=rx_idx.size)
+            eps2 = rng.normal(size=rx_idx.size)
+            rho = float(np.clip(EFF_RHO_RX, -0.95, 0.95))
+            z_cr = rho * z_common + np.sqrt(max(0.0, 1.0 - rho * rho)) * eps1
+            z_ypt = (-rho) * z_common + np.sqrt(max(0.0, 1.0 - rho * rho)) * eps2
+
+            # Catch rate ~ logit-normal around base mean (keep in (0,1))
+            p0 = np.clip(rx_cr_base, 1e-4, 1.0 - 1e-4)
+            mu_cr = np.log(p0 / (1.0 - p0))
+            logit_cr_draw = mu_cr + s_cr * z_cr
+            cr_draw = np.clip(_inv_logit(logit_cr_draw), 0.0, 1.0)
+
+            # YPT ~ lognormal around base mean
+            m_ypt = np.maximum(rx_ypt_base, 1e-3)
+            mu_ypt = np.log(m_ypt) - 0.5 * (sigma_ypt ** 2)
+            ln_ypt_draw = mu_ypt + sigma_ypt * z_ypt
+            ypt_draw = np.exp(ln_ypt_draw)
+
+            # Receptions
             n_binom = np.maximum(0, np.rint(rx_targets)).astype(np.int64)
-            recs = rng.binomial(n=n_binom, p=rx_cr)
+            recs = rng.binomial(n=n_binom, p=np.clip(cr_draw, 0.0, 1.0))
             draw["receptions"][rx_idx] = recs
-            draw["rec_yards"][rx_idx] = recs * rx_ypr
+
+            # YPR = YPT / CR (safe), with a gentle hard cap to avoid absurd outliers
+            small = 1e-6
+            ypr_draw = np.divide(ypt_draw, np.maximum(cr_draw, small))
+            ypr_draw = np.clip(ypr_draw, 0.0, float(EFF_YPR_MAX))
+
+            # Receiving yards
+            draw["rec_yards"][rx_idx] = recs * ypr_draw
 
             # TD allocation with red-zone tilt
             base_w_rec = rx_targets * rx_rrate
@@ -276,12 +352,23 @@ def simulate_from_point(
                 alloc_rec_tds = allocate_total_by_weights(t["pass_tds"], np.maximum(0.0, weights_rec))
             draw["rec_tds"][rx_idx] = alloc_rec_tds
 
-        # Rushing draw
+        # -------- Rushing draw (shares + YPC sampling) --------
         if ru_idx.size > 0:
             ru_share = _dirichlet_sample(base_ru, SIM_PHI_RUSH, rng)
             ru_att = max(0.0, t["rush_attempts"]) * ru_share
             draw["rush_att"][ru_idx] = ru_att
-            draw["rush_yards"][ru_idx] = ru_att * ru_yprush
+
+            # Exposure-based shrink for YPC
+            exp_shrink_ru = np.sqrt(1.0 + ru_att / max(EFF_EXPOSURE_SHRINK, 1e-6))
+            cv_yprush = EFF_RUSH_YPC_CV / exp_shrink_ru
+            sigma_yprush = np.sqrt(np.log1p(np.square(np.clip(cv_yprush, 0.0, 10.0))))
+
+            m_yprush = np.maximum(ru_yprush_base, 1e-3)
+            mu_yprush = np.log(m_yprush) - 0.5 * (sigma_yprush ** 2)
+            ln_yprush_draw = mu_yprush + sigma_yprush * rng.normal(size=ru_idx.size)
+            yprush_draw = np.clip(np.exp(ln_yprush_draw), 0.0, float(EFF_RUSH_YPC_MAX))
+
+            draw["rush_yards"][ru_idx] = ru_att * yprush_draw
 
             # TD allocation with red-zone tilt
             base_w_rush = ru_att * ru_rtrate
@@ -293,7 +380,7 @@ def simulate_from_point(
                 alloc_rush_tds = allocate_total_by_weights(t["rush_tds"], np.maximum(0.0, weights_rush))
             draw["rush_tds"][ru_idx] = alloc_rush_tds
 
-        # QB attribution for passing yards/TDs
+        # QB attribution for passing yards/TDs (all to QB1)
         qb_pass_yards = np.zeros(len(df), dtype=float)
         qb_pass_tds = np.zeros(len(df), dtype=float)
         if qb1_idx.size > 0:
@@ -302,25 +389,25 @@ def simulate_from_point(
         draw["pass_yards"] = qb_pass_yards
         draw["pass_tds"] = qb_pass_tds
 
-        # Team-level reconciliation to totals
+        # Per-draw reconciliation to team totals (guards and preserves totals)
         if rx_idx.size > 0:
             draw["rec_yards"][rx_idx] = _safe_rescale_1d(draw["rec_yards"][rx_idx], max(0.0, t["pass_yards"]))
-            draw["rec_tds"][rx_idx] = _safe_rescale_1d(draw["rec_tds"][rx_idx], max(0.0, t["pass_tds"]))
+            draw["rec_tds"][rx_idx]   = _safe_rescale_1d(draw["rec_tds"][rx_idx],   max(0.0, t["pass_tds"]))
         if ru_idx.size > 0:
             draw["rush_yards"][ru_idx] = _safe_rescale_1d(draw["rush_yards"][ru_idx], max(0.0, t["rush_yards"]))
-            draw["rush_tds"][ru_idx] = _safe_rescale_1d(draw["rush_tds"][ru_idx], max(0.0, t["rush_tds"]))
+            draw["rush_tds"][ru_idx]   = _safe_rescale_1d(draw["rush_tds"][ru_idx],   max(0.0, t["rush_tds"]))
 
         for s in stats:
             agg[s].append(draw[s])
 
-    # Aggregate players
+    # Aggregate players across draws
     out = {}
     for s in stats:
         mat = np.stack(agg[s], axis=0) if len(agg[s]) > 0 else np.zeros((0, len(df)), dtype=float)
         out[f"{s}_mean"] = mat.mean(axis=0) if mat.size else np.zeros(len(df), dtype=float)
-        out[f"{s}_p10"] = np.percentile(mat, 10, axis=0) if mat.size else np.zeros(len(df), dtype=float)
-        out[f"{s}_p50"] = np.percentile(mat, 50, axis=0) if mat.size else np.zeros(len(df), dtype=float)
-        out[f"{s}_p90"] = np.percentile(mat, 90, axis=0) if mat.size else np.zeros(len(df), dtype=float)
+        out[f"{s}_p10"]  = np.percentile(mat, 10, axis=0) if mat.size else np.zeros(len(df), dtype=float)
+        out[f"{s}_p50"]  = np.percentile(mat, 50, axis=0) if mat.size else np.zeros(len(df), dtype=float)
+        out[f"{s}_p90"]  = np.percentile(mat, 90, axis=0) if mat.size else np.zeros(len(df), dtype=float)
 
     player_summary = df[["player_id", "player_name", "position"]].copy()
     for k, v in out.items():
@@ -332,10 +419,9 @@ def simulate_from_point(
     for k, arr in team_agg.items():
         a = np.array(arr, dtype=float)
         team_out[f"{k}_mean"] = float(a.mean()) if a.size else 0.0
-        team_out[f"{k}_p10"] = float(np.percentile(a, 10)) if a.size else 0.0
-        team_out[f"{k}_p50"] = float(np.percentile(a, 50)) if a.size else 0.0
-        team_out[f"{k}_p90"] = float(np.percentile(a, 90)) if a.size else 0.0
+        team_out[f"{k}_p10"]  = float(np.percentile(a, 10)) if a.size else 0.0
+        team_out[f"{k}_p50"]  = float(np.percentile(a, 50)) if a.size else 0.0
+        team_out[f"{k}_p90"]  = float(np.percentile(a, 90)) if a.size else 0.0
 
     team_summary = pd.DataFrame([team_out])
-
     return team_summary, player_summary
