@@ -22,3 +22,13 @@ __all__ = [
     "attribute_players_from_plays",
     "build_game_sampling",
 ]
+
+from .calibrate import run_calibration, simulate_games_for_schedule, summarize_quantiles, reliability_report, pit_report
+
+__all__ += [
+    "run_calibration",
+    "simulate_games_for_schedule",
+    "summarize_quantiles",
+    "reliability_report",
+    "pit_report",
+]
