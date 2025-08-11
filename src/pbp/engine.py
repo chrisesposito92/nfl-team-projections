@@ -211,7 +211,7 @@ def simulate_single_game(
                     "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                     "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
-                burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+                burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
                 _handle_interception_touchback(st)
                 continue
 
@@ -227,7 +227,7 @@ def simulate_single_game(
                     "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                     "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
-                burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+                burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
                 st.advance_down(new_y, max(0, int(-gained)))
                 continue
 
@@ -242,7 +242,7 @@ def simulate_single_game(
                     "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                     "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
-                burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=True)
+                burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=True)
                 if st.down < 4:
                     st.down += 1
                 else:
@@ -263,7 +263,7 @@ def simulate_single_game(
                     "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                     "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
-                burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+                burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
                 _handle_td(st, plays, rng)
                 continue
 
@@ -278,7 +278,7 @@ def simulate_single_game(
                     "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                     "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
-                burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+                burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
                 st.flip_possession(new_yardline=100 - new_y)
                 continue
 
@@ -294,7 +294,7 @@ def simulate_single_game(
             }))
             burn_clock_seconds(
                 st,
-                base_seconds=outcome["time_elapsed"],
+                base_seconds=BASE_TEMPO_SEC,
                 incomplete=False,
                 oob=(not bool(outcome.get("in_bounds", True))),
             )
@@ -318,7 +318,7 @@ def simulate_single_game(
                 "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                 "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
             }))
-            burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+            burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
             _handle_td(st, plays, rng)
             continue
 
@@ -333,7 +333,7 @@ def simulate_single_game(
                 "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
                 "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
             }))
-            burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+            burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
             st.flip_possession(new_yardline=100 - new_y)
             continue
 
@@ -347,7 +347,7 @@ def simulate_single_game(
             "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
             "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
         }))
-        burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
+        burn_clock_seconds(st, base_seconds=BASE_TEMPO_SEC, incomplete=False)
         st.advance_down(new_y, int(round(max(0.0, gained))))
 
         if st.down > 4:
