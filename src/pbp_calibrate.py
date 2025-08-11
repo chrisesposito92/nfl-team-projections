@@ -8,6 +8,9 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
+from nfl_data_py import import_schedules
+from .pbp.calibrate import run_calibration
+
 # Engine & priors (your package)
 from .pbp import simulate_game, build_game_priors
 
@@ -157,144 +160,57 @@ def _pit_value(truth: float, draws: np.ndarray) -> float:
         return np.nan
     return float(np.mean(draws <= truth))
 
+def build_schedule(years, season_type="REG", weeks=None) -> pd.DataFrame:
+    df = import_schedules(years)
+    # nfl_data_py uses "season_type" or "game_type" depending on version
+    if "season_type" in df.columns:
+        df = df[df["season_type"] == season_type]
+    elif "game_type" in df.columns:
+        df = df[df["game_type"] == season_type]
+    cols = {}
+    if "home_team" in df.columns: cols["home"] = "home_team"
+    elif "home" in df.columns:   cols["home"] = "home"
+    if "away_team" in df.columns: cols["away"] = "away_team"
+    elif "away" in df.columns:    cols["away"] = "away"
+    cols["season"] = "season"
+    cols["week"] = "week"
+    df = df[list(cols.values())].rename(columns={v:k for k,v in cols.items()})
+    df["home"] = df["home"].str.upper()
+    df["away"] = df["away"].str.upper()
+    if weeks:
+        df = df[df["week"].isin(weeks)]
+    return df[["season","week","home","away"]].reset_index(drop=True)
+
 
 def main():
     p = argparse.ArgumentParser("PBP Calibration Harness")
-    # Schedule sources
-    p.add_argument("--schedule-csv", type=str, default="", help="Optional prebuilt schedule CSV.")
-    p.add_argument("--years", type=int, nargs="+", default=[], help="Seasons to load via nfl_data_py.import_schedules")
-    p.add_argument("--season-type", type=str, default="REG", help="REG or POST (default REG)")
-
-    # Optional single-game filter on top of schedule
-    p.add_argument("--year", type=int, default=None)
-    p.add_argument("--home", type=str, default=None)
-    p.add_argument("--away", type=str, default=None)
-    p.add_argument("--week", type=int, default=None)
-
-    # Sim params
+    p.add_argument("--years", nargs="+", type=int, required=True)
+    p.add_argument("--season-type", choices=["REG","POST"], default="REG")
+    p.add_argument("--weeks", nargs="*", type=int, default=None)
     p.add_argument("--sims-per-game", type=int, default=200)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--limit", type=int, default=None, help="Limit number of games (debug/smoke)")
-
-    # Engine toggles (parsed for bookkeeping; simulate_game uses your defaults)
+    p.add_argument("--seed", type=int, default=7)
     p.add_argument("--engine", choices=["stateful","simple"], default="stateful")
     p.add_argument("--penalties", choices=["on","off"], default="off")
     p.add_argument("--anchor", choices=["on","off"], default="off")
-
-    # Outputs
-    p.add_argument("--out", type=str, default="artifacts/pbp_cal", help="Output directory")
-
+    p.add_argument("--truth-csv", type=str, default=None)
+    p.add_argument("--outdir", type=str, default=None)
     args = p.parse_args()
 
-    os.makedirs(args.out, exist_ok=True)
+    schedule = build_schedule(args.years, season_type=args.season_type, weeks=args.weeks)
+    out = run_calibration(
+        schedule,
+        sims_per_game=args.sims_per_game,
+        seed=args.seed,
+        engine=args.engine,
+        penalties=(args.penalties == "on"),
+        anchor=(args.anchor == "on"),
+        out_dir=args.outdir,
+        truth_csv=args.truth_csv,
+    )
 
-    sched = _load_schedule(args)
-    sched = _filter_schedule(sched, args)
-
-    if sched.empty:
-        print("No games after filtering. Check your flags.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Running {len(sched)} games | sims/game={args.sims_per_game} | engine={args.engine} | penalties={args.penalties} | anchor={args.anchor}")
-
-    summary_rows: List[Dict[str, Any]] = []
-    pit_rows: List[Dict[str, Any]] = []
-
-    base_seed = int(args.seed)
-
-    for i, r in enumerate(sched.itertuples(index=False), start=1):
-        season = int(getattr(r, "season"))
-        week = int(getattr(r, "week"))
-        home = str(getattr(r, "home"))
-        away = str(getattr(r, "away"))
-
-        seed_i = base_seed + i  # simple per-game jitter
-
-        h_draws, a_draws = _sim_points_for_game(home, away, season, args.sims_per_game, seed_i)
-        sim_ok = (h_draws.size == args.sims_per_game and a_draws.size == args.sims_per_game)
-
-        # summaries
-        hs = _summarize(h_draws)
-        asu = _summarize(a_draws)
-        p_home_win = float(np.mean(h_draws > a_draws)) if h_draws.size and a_draws.size else np.nan
-
-        # truth (if available on schedule)
-        home_truth = float(getattr(r, "home_score_truth", np.nan)) if hasattr(r, "home_score_truth") else np.nan
-        away_truth = float(getattr(r, "away_score_truth", np.nan)) if hasattr(r, "away_score_truth") else np.nan
-        home_pit = _pit_value(home_truth, h_draws)
-        away_pit = _pit_value(away_truth, a_draws)
-
-        summary_rows.append({
-            "season": season,
-            "week": week,
-            "home": home,
-            "away": away,
-            "engine": args.engine,
-            "penalties": args.penalties,
-            "anchor": args.anchor,
-            "sims": int(args.sims_per_game),
-            "ok": bool(sim_ok),
-            # predictions
-            "pred_home_mean": hs["mean"],
-            "pred_home_p10":  hs["p10"],
-            "pred_home_p50":  hs["p50"],
-            "pred_home_p90":  hs["p90"],
-            "pred_away_mean": asu["mean"],
-            "pred_away_p10":  asu["p10"],
-            "pred_away_p50":  asu["p50"],
-            "pred_away_p90":  asu["p90"],
-            "pred_p_home_win": p_home_win,
-            # truth (if present)
-            "truth_home": home_truth,
-            "truth_away": away_truth,
-            # PIT (for later histograms)
-            "pit_home_points": home_pit,
-            "pit_away_points": away_pit,
-        })
-
-        pit_rows.append({
-            "season": season,
-            "week": week,
-            "home": home,
-            "away": away,
-            "team": home,
-            "pit_points": home_pit,
-        })
-        pit_rows.append({
-            "season": season,
-            "week": week,
-            "home": home,
-            "away": away,
-            "team": away,
-            "pit_points": away_pit,
-        })
-
-        if (i % 25) == 0 or i == len(sched):
-            print(f"  {i:>4}/{len(sched)}  {away}@{home}  mean {asu['mean']:.1f}-{hs['mean']:.1f}  p(H win)={p_home_win:.3f}")
-
-    # Write artifacts
-    summary_df = pd.DataFrame(summary_rows)
-    pit_df = pd.DataFrame(pit_rows)
-
-    sum_path = os.path.join(args.out, "summary_points.csv")
-    pit_path = os.path.join(args.out, "pit_points.csv")
-    summary_df.to_csv(sum_path, index=False)
-    pit_df.to_csv(pit_path, index=False)
-
-    print("\nWrote:")
-    print(" ", sum_path)
-    print(" ", pit_path)
-    # Quick overall sanity print
-    if "truth_home" in summary_df.columns and summary_df["truth_home"].notna().any():
-        valid = summary_df.dropna(subset=["truth_home","truth_away"])
-        mae = np.abs((valid["pred_home_mean"] - valid["truth_home"])) \
-              + np.abs((valid["pred_away_mean"] - valid["truth_away"]))
-        mae = float(mae.mean()) if len(valid) else np.nan
-        print(f"Mean absolute error (sum of teams) ~ {mae:.2f} points over {len(valid)} games.")
-    else:
-        print("No truth in schedule; run produced predictions only.")
-    return 0
-
+    print("Calibration complete.")
+    if args.outdir:
+        print(f"Artifacts written to: {args.outdir}")
 
 if __name__ == "__main__":
     sys.exit(main())

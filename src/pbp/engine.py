@@ -113,17 +113,30 @@ def _do_kickoff(
         state.drive_id += 1
         state.first_down_reset(start_y)
 
-def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomState,
-                         priors: GamePriors | None = None) -> pd.DataFrame:
+def simulate_single_game(
+    home: str,
+    away: str,
+    year: int,
+    rng: np.random.RandomState,
+    priors: GamePriors | None = None,
+    # NEW knobs to mirror simple engine
+    penalties_enabled: bool = False,
+    penalty_rate: float = 0.0,
+    apply_anchor: bool = False,
+    anchor_weight: float = 0.0,
+) -> pd.DataFrame:
     if priors is None:
-        # Local/lazy import avoids import-time ordering issues
         from .priors import build_game_priors as _build_game_priors
         priors = _build_game_priors(home, away, year)
+
+    # NEW: penalty config
+    pen_cfg = PenaltyConfig(enabled=bool(penalties_enabled),
+                            base_rate=float(max(0.0, penalty_rate)))
 
     st = start_state(home, away, receive_first="away")
     plays: List[Dict[str, Any]] = []
 
-    # Opening kickoff: home kicks to away (since away receives 1H per start_state convention)
+    # Opening kickoff
     if st.is_kickoff:
         _do_kickoff(st, rng, plays, kicking_team=priors.home.team, receiving_team=priors.away.team)
         st.is_kickoff = False
@@ -131,14 +144,11 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
     while st.quarter <= REGULATION_QUARTERS and len(plays) < MAX_PLAYS_HARD:
         if st.clock <= 0:
             if st.quarter == 2:
-                # Halftime -> Q3 kickoff: away kicks to home
-                next_quarter(st)  # sets quarter=3, clock=15:00
+                next_quarter(st)
                 _do_kickoff(st, rng, plays, kicking_team=priors.away.team, receiving_team=priors.home.team)
                 continue
-
             if st.quarter >= REGULATION_QUARTERS:
                 break
-
             next_quarter(st)
             continue
 
@@ -146,14 +156,18 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
 
         if _should_fg(st, off_pr):
             good, pts = field_goal_attempt(st.yardline, rng)
-            plays.append(_record_row(st, {
+            row = _record_row(st, {
                 "play_type": "fg", "yards_gained": 0.0,
                 "result": "FG GOOD" if good else "FG NO GOOD",
                 "points": pts,
                 "is_pass": False, "is_run": False,
                 "is_complete": False, "is_sack": False,
                 "is_interception": False, "is_fumble": False,
-            }))
+                # penalty stub columns (special teams rarely flagged here in MVP)
+                "penalty": False, "penalty_yards": 0,
+                "penalty_on_offense": False, "penalty_type": "",
+            })
+            plays.append(row)
             burn_clock_seconds(st, base_seconds=5.0, incomplete=False)
             if good:
                 st.add_points_offense(pts)
@@ -164,18 +178,21 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
 
         if _should_punt(st):
             net = punt_net_yards(rng)
-            plays.append(_record_row(st, {
+            row = _record_row(st, {
                 "play_type": "punt", "yards_gained": float(net),
                 "result": "PUNT", "points": 0,
                 "is_pass": False, "is_run": False,
                 "is_complete": False, "is_sack": False,
                 "is_interception": False, "is_fumble": False,
-            }))
+                "penalty": False, "penalty_yards": 0,
+                "penalty_on_offense": False, "penalty_type": "",
+            })
+            plays.append(row)
             burn_clock_seconds(st, base_seconds=6.0, incomplete=False)
             st.flip_possession(new_yardline=max(20, int(100 - (st.yardline + net))))
             continue
 
-        # Go-for-it uses normal scrimmage play below
+        # Go-for-it uses scrimmage play below
         st.play_id += 1
         ptype = "pass" if choose_play_type(st, off_pr, rng) == "pass" else "run"
 
@@ -184,12 +201,15 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
             gained = float(outcome["yards"])
 
             if outcome["interception"]:
+                pen = maybe_penalty(rng, pen_cfg)
                 plays.append(_record_row(st, {
                     "play_type": "pass", "yards_gained": gained,
                     "result": "INT", "points": 0,
                     "is_pass": True, "is_run": False,
                     "is_complete": False, "is_sack": False,
                     "is_interception": True, "is_fumble": False,
+                    "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                    "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
                 burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
                 _handle_interception_touchback(st)
@@ -197,24 +217,30 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
 
             if outcome["sack"]:
                 new_y = yardline_after_gain(st.yardline, gained)
+                pen = maybe_penalty(rng, pen_cfg)
                 plays.append(_record_row(st, {
                     "play_type": "pass", "yards_gained": gained,
                     "result": "SACK", "points": 0,
                     "is_pass": True, "is_run": False,
                     "is_complete": False, "is_sack": True,
                     "is_interception": False, "is_fumble": False,
+                    "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                    "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
                 burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
                 st.advance_down(new_y, max(0, int(-gained)))
                 continue
 
             if not outcome["complete"]:
+                pen = maybe_penalty(rng, pen_cfg)
                 plays.append(_record_row(st, {
                     "play_type": "pass", "yards_gained": 0.0,
                     "result": "INCOMPLETE", "points": 0,
                     "is_pass": True, "is_run": False,
                     "is_complete": False, "is_sack": False,
                     "is_interception": False, "is_fumble": False,
+                    "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                    "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
                 burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=True)
                 if st.down < 4:
@@ -226,6 +252,7 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
             # Completed pass
             new_y = yardline_after_gain(st.yardline, gained)
             if new_y >= 100:
+                pen = maybe_penalty(rng, pen_cfg)
                 plays.append(_record_row(st, {
                     "play_type": "pass",
                     "yards_gained": float(100 - st.yardline),
@@ -233,29 +260,37 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
                     "is_pass": True, "is_run": False,
                     "is_complete": True, "is_sack": False,
                     "is_interception": False, "is_fumble": False,
+                    "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                    "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
                 burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
-                _handle_td(st)
+                _handle_td(st, plays, rng)
                 continue
 
             if outcome["fumble"]:
+                pen = maybe_penalty(rng, pen_cfg)
                 plays.append(_record_row(st, {
                     "play_type": "pass", "yards_gained": gained,
                     "result": "FUMBLE-LOST", "points": 0,
                     "is_pass": True, "is_run": False,
                     "is_complete": True, "is_sack": False,
                     "is_interception": False, "is_fumble": True,
+                    "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                    "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
                 }))
                 burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
                 st.flip_possession(new_yardline=100 - new_y)
                 continue
 
+            pen = maybe_penalty(rng, pen_cfg)
             plays.append(_record_row(st, {
                 "play_type": "pass", "yards_gained": gained,
                 "result": "COMPLETE", "points": 0,
                 "is_pass": True, "is_run": False,
                 "is_complete": True, "is_sack": False,
                 "is_interception": False, "is_fumble": False,
+                "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
             }))
             burn_clock_seconds(
                 st,
@@ -272,6 +307,7 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
         new_y = yardline_after_gain(st.yardline, gained)
 
         if new_y >= 100:
+            pen = maybe_penalty(rng, pen_cfg)
             plays.append(_record_row(st, {
                 "play_type": "run",
                 "yards_gained": float(100 - st.yardline),
@@ -279,29 +315,37 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
                 "is_pass": False, "is_run": True,
                 "is_complete": False, "is_sack": False,
                 "is_interception": False, "is_fumble": False,
+                "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
             }))
             burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
-            _handle_td(st)
+            _handle_td(st, plays, rng)
             continue
 
         if outcome["fumble"]:
+            pen = maybe_penalty(rng, pen_cfg)
             plays.append(_record_row(st, {
                 "play_type": "run", "yards_gained": gained,
                 "result": "FUMBLE-LOST", "points": 0,
                 "is_pass": False, "is_run": True,
                 "is_complete": False, "is_sack": False,
                 "is_interception": False, "is_fumble": True,
+                "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+                "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
             }))
             burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
             st.flip_possession(new_yardline=100 - new_y)
             continue
 
+        pen = maybe_penalty(rng, pen_cfg)
         plays.append(_record_row(st, {
             "play_type": "run", "yards_gained": gained,
             "result": "RUN", "points": 0,
             "is_pass": False, "is_run": True,
             "is_complete": False, "is_sack": False,
             "is_interception": False, "is_fumble": False,
+            "penalty": bool(pen["penalty"]), "penalty_yards": int(pen["penalty_yards"]),
+            "penalty_on_offense": bool(pen["penalty_on_offense"]), "penalty_type": str(pen["penalty_type"]),
         }))
         burn_clock_seconds(st, base_seconds=outcome["time_elapsed"], incomplete=False)
         st.advance_down(new_y, int(round(max(0.0, gained))))
@@ -320,11 +364,19 @@ def simulate_single_game(home: str, away: str, year: int, rng: np.random.RandomS
         "is_pass": False, "is_run": False,
         "is_complete": False, "is_sack": False,
         "is_interception": False, "is_fumble": False,
+        # schema consistency
+        "penalty": False, "penalty_yards": 0,
+        "penalty_on_offense": False, "penalty_type": "",
     }
     df = pd.DataFrame(plays)
     if not df.empty:
         df["home"] = priors.home.team
         df["away"] = priors.away.team
+
+    # NEW: optional soft anchor (post-process, yards only)
+    if apply_anchor and anchor_weight > 0.0 and not df.empty:
+        df = soft_anchor_yards(df, priors=priors, weights=AnchorWeights(yards_weight=float(anchor_weight)))
+
     return pd.concat([df, pd.DataFrame([final])], ignore_index=True)
 
 def simulate_game(

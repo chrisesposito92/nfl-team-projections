@@ -1,11 +1,17 @@
 # src/pbp_cli.py
 from __future__ import annotations
 import sys, os, argparse
+import numpy as np
 import pandas as pd
-from .pbp import simulate_game, build_game_priors, attribute_players_from_plays
+from .pbp import (
+    build_game_priors,
+    attribute_players_from_plays,
+    simulate_single_game as simulate_stateful,  # stateful engine (kickoffs, OOB, etc.)
+    simulate_game as simulate_simple,           # simple/pace engine
+)
 
 def main():
-    parser = argparse.ArgumentParser("PBP Game Simulator (Phase-1 complete: penalties stub + soft anchor)")
+    parser = argparse.ArgumentParser("PBP Game Simulator (Phase-1: stateful/simple + penalties stub + soft anchor)")
     parser.add_argument("--home", required=True)
     parser.add_argument("--away", required=True)
     parser.add_argument("--year", type=int, required=True)
@@ -14,36 +20,56 @@ def main():
     parser.add_argument("--csv", type=str, default="")
     parser.add_argument("--players-csv", type=str, default=None)
 
-    # NEW toggles
-    parser.add_argument("--penalties", action="store_true", help="Enable placeholder penalties (annotation only).")
-    parser.add_argument("--penalty-rate", type=float, default=0.0, help="Per-play penalty chance (0..1). Default 0.")
-    parser.add_argument("--anchor-weight", type=float, default=0.0, help="Soft-anchoring weight for pass/rush yards (0..1). Default 0 (off).")
+    # toggles
+    parser.add_argument("--engine", choices=["stateful", "simple"], default="stateful")
+    parser.add_argument("--penalties", choices=["on", "off"], default="off")
+    parser.add_argument("--anchor", choices=["on", "off"], default="off")
+    parser.add_argument("--penalty-rate", type=float, default=0.10)   # optional
+    parser.add_argument("--anchor-weight", type=float, default=0.25)  # optional
 
     args = parser.parse_args()
 
-    priors = build_game_priors(args.home.upper(), args.away.upper(), args.year)
-    sims = simulate_game(
-        args.home.upper(),
-        args.away.upper(),
-        args.year,
-        n_sims=args.sims,
-        seed=args.seed,
-        priors=priors,
-        penalties_enabled=args.penalties,
-        penalty_rate=args.penalty_rate,
-        anchor_weight=args.anchor_weight,
-    )
+    home = args.home.upper()
+    away = args.away.upper()
+
+    # define these BEFORE use
+    penalties_on = (args.penalties == "on")
+    anchor_on    = (args.anchor == "on")
+
+    priors = build_game_priors(home, away, args.year)
+
+    if args.engine == "stateful":
+        # simulate_stateful returns a single DF per call; build a list
+        sims = [
+            simulate_stateful(
+                home, away, args.year,
+                rng=np.random.RandomState(args.seed + 37 * k),
+                priors=priors,
+                penalties_enabled=penalties_on,
+                penalty_rate=(args.penalty_rate if penalties_on else 0.0),
+                apply_anchor=anchor_on,
+                anchor_weight=(args.anchor_weight if anchor_on else 0.0),
+            )
+            for k in range(args.sims)
+        ]
+    else:
+        # simple engine already returns a list
+        sims = simulate_simple(
+            home, away, args.year,
+            n_sims=args.sims,
+            seed=args.seed,
+            priors=priors,
+            penalties_enabled=penalties_on,
+            penalty_rate=(args.penalty_rate if penalties_on else 0.0),
+            anchor_weight=(args.anchor_weight if anchor_on else 0.0),
+        )
 
     # First sim’s plays
     plays = sims[0]
 
-    # Player attribution using NGS tilts + base shares (already in your codebase)
+    # Player attribution
     player_box = attribute_players_from_plays(
-        plays,
-        home=args.home.upper(),
-        away=args.away.upper(),
-        year=args.year,
-        seed=args.seed or 0,
+        plays, home=home, away=away, year=args.year, seed=args.seed or 0
     )
 
     # Save plays
@@ -63,11 +89,8 @@ def main():
         print(f"Saved: {players_csv_path}")
 
     # Print summary for the first sim
-    df = plays
-    print(df.tail(3).to_string(index=False))
-    home = args.home.upper()
-    away = args.away.upper()
-    final_row = df.iloc[-1]
+    print(plays.tail(3).to_string(index=False))
+    final_row = plays.iloc[-1]
     print(f"\nFINAL: {away} {final_row['away_score']} @ {home} {final_row['home_score']}")
 
 if __name__ == "__main__":

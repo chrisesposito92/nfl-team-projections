@@ -30,5 +30,6 @@ def next_quarter(state: GameState) -> None:
     state.clock = QTR_SECONDS
 
 def yardline_after_gain(yardline: int, gain: float) -> int:
-    ny = int(max(1, min(99, round(yardline + gain))))
-    return ny
+    # Do not upper‑clamp here. Let callers detect TDs when >= 100.
+    ny = int(round(yardline + gain))
+    return max(1, ny)

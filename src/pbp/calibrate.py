@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 
 # We depend only on the public pbp surface you already expose
-from . import simulate_game, build_game_priors
+from . import (
+    simulate_game as simulate_simple,
+    simulate_single_game as simulate_stateful,
+    build_game_priors,
+)
 
 # --------- What we calibrate by default ----------
 CALIB_METRICS: Tuple[str, ...] = (
@@ -155,43 +159,81 @@ def simulate_games_for_schedule(
     anchor: bool = False,
 ) -> pd.DataFrame:
     """
-    schedule columns: season, week, home, away (abbrs).
-    Returns long 'samples' DataFrame with one row per (game, team, metric, sim).
+    Simulate every game in `schedule` and return a long 'samples' DataFrame.
+
+    Expected schedule columns (uppercase team abbrs recommended):
+      - season (int)
+      - week   (int)
+      - home   (str)
+      - away   (str)
+
+    Returns a DataFrame with columns:
+      [season, week, home, away, team, metric, value, sim_id]
+    where 'metric' ∈ CALIB_METRICS and 'value' is the simulated quantity.
     """
-    need = {"season","week","home","away"}
+    # Validate schedule shape
+    need = {"season", "week", "home", "away"}
     missing = [c for c in need if c not in schedule.columns]
     if missing:
         raise ValueError(f"schedule is missing columns: {missing}")
 
-    samples_all = []
-    for i, row in enumerate(schedule.itertuples(index=False), start=1):
+    # Normalize team codes just in case
+    sch = schedule.copy()
+    sch["home"] = sch["home"].astype(str).str.upper()
+    sch["away"] = sch["away"].astype(str).str.upper()
+
+    # Penalty/anchor knobs to pass through
+    penalty_rate = 0.10 if penalties else 0.0
+    anchor_weight = 0.25 if anchor else 0.0
+
+    samples_all: List[pd.DataFrame] = []
+
+    for i, row in enumerate(sch.itertuples(index=False), start=1):
         season = int(getattr(row, "season"))
         week   = int(getattr(row, "week"))
-        home   = str(getattr(row, "home")).upper()
-        away   = str(getattr(row, "away")).upper()
+        home   = str(getattr(row, "home"))
+        away   = str(getattr(row, "away"))
 
         priors = build_game_priors(home, away, season)
-        # seed jitter per game to avoid identical streams
+
+        # Jitter the game seed so different games don't share streams
         game_seed = int(seed + i * 9973)
 
-        # Call the public API; your simulate_game already returns a list of play DFs
-        sims = simulate_game(
-            home, away, season,
-            n_sims=sims_per_game,
-            seed=game_seed,
-            priors=priors,
-            engine=engine,
-            penalties=("on" if penalties else "off"),
-            anchor=("on" if anchor else "off"),
-        )
+        if engine == "stateful":
+            # The stateful engine runs one sim per call; loop to build a list
+            sims: List[pd.DataFrame] = []
+            for k in range(int(sims_per_game)):
+                df = simulate_stateful(
+                    home, away, season,
+                    rng=np.random.RandomState(game_seed + 37 * k),
+                    priors=priors,
+                    penalties_enabled=bool(penalties),
+                    penalty_rate=penalty_rate,
+                    apply_anchor=bool(anchor),
+                    anchor_weight=anchor_weight,
+                )
+                sims.append(df)
+        else:
+            # The simple engine returns a list of DataFrames in one call
+            sims = simulate_simple(
+                home, away, season,
+                n_sims=int(sims_per_game),
+                seed=game_seed,
+                priors=priors,
+                penalties_enabled=bool(penalties),
+                penalty_rate=penalty_rate,
+                anchor_weight=anchor_weight,
+            )
 
+        # Convert sims → team game boxes → long samples for calibration
         sim_boxes = [team_box_from_plays(df) for df in sims]
         gkey = GameKey(season=season, week=week, home=home, away=away)
         samples_all.append(_samples_long(gkey, sim_boxes))
 
-    return pd.concat(samples_all, ignore_index=True) if samples_all else pd.DataFrame(
-        columns=["season","week","home","away","team","metric","value","sim_id"]
-    )
+    if not samples_all:
+        return pd.DataFrame(columns=["season","week","home","away","team","metric","value","sim_id"])
+
+    return pd.concat(samples_all, ignore_index=True)
 
 
 def summarize_quantiles(
